@@ -119,6 +119,8 @@ If the variable is absent, the file is missing, permissions are broader than `06
 
 This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments, Discussions, and Classic Quizzes with questions after the normal policy and approval gates. It does not yet upload local files, create New Quizzes, or perform account/course administration. File upload requires a separate payload-specific approval design so the MCP never sends an unintended local file to Canvas.
 
+See [`docs/2026-08-06-content-authoring-extension.md`](docs/2026-08-06-content-authoring-extension.md) for the implementation and end-to-end validation record.
+
 ## Development
 
 ```bash
