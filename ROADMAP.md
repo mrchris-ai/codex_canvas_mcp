@@ -1,12 +1,17 @@
 # Roadmap
 
-The initial release intentionally supports Canvas reads plus one tightly guarded page-writing action. The following administrative capabilities are deferred. None should be implemented as a generic Canvas write passthrough.
+The current release intentionally supports Canvas reads plus tightly guarded authoring of Pages, Modules/module items, Assignments, Discussions, and Classic Quizzes/questions. The following capabilities are deferred. None should be implemented as a generic Canvas write passthrough.
 
 ## Safety design required before implementation
 
 Each future feature needs its own narrow tool contract, least-privilege credential review, explicit target allowlist, dry-run or preview output, exact confirmation phrase, client-side approval, audit-safe logging, rollback guidance, and tests proving cross-course isolation.
 
 ## Deferred feature areas
+
+### File upload and New Quizzes
+
+- File upload must require approval of the exact file payload, not merely a course-level write approval.
+- New Quizzes needs a reviewed tool contract; it is distinct from the Classic Quiz API.
 
 ### Sandbox and course-shell provisioning
 

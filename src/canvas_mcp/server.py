@@ -21,7 +21,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 PROTOCOL_VERSION = "2025-03-26"
 
 
@@ -89,10 +89,15 @@ def canvas_token() -> str:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ConfigurationError("1Password returned invalid item data.") from exc
+    concealed_fields = []
     for field in payload.get("fields", []):
         label = field.get("label") or field.get("id")
         if label == field_name and field.get("type") == "CONCEALED" and field.get("value"):
             return str(field["value"])
+        if field.get("type") == "CONCEALED" and field.get("value"):
+            concealed_fields.append(field)
+    if field_name == "credential" and len(concealed_fields) == 1:
+        return str(concealed_fields[0]["value"])
     raise ConfigurationError(
         f"1Password item has no concealed field named {field_name!r}."
     )
@@ -185,15 +190,32 @@ def require_course_id(value: Any) -> int:
     return value
 
 
-def require_write_approval(course_id: int, confirmation: Any) -> None:
+def require_write_approval(course_id: int, confirmation: Any, action: str) -> None:
     policy = write_policy()
     if not policy["enabled"] or course_id not in policy["approved_course_ids"]:
         raise PermissionError(
             "Canvas writing is disabled or this course is not approved by the local policy."
         )
-    expected = f"APPROVE CANVAS PAGE WRITE course {course_id}"
+    expected = f"APPROVE CANVAS {action.upper()} WRITE course {course_id}"
     if confirmation != expected:
         raise PermissionError(f"Confirmation must exactly match: {expected}")
+
+
+def require_text(value: Any, name: str, maximum: int = 255) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+        raise ValueError(f"{name} must contain 1 to {maximum} characters.")
+    return value
+
+
+def require_boolean(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean.")
+    return value
+
+
+def content_write(course_id: int, confirmation: Any, action: str, method: str, path: str, data: dict[str, Any]) -> Any:
+    require_write_approval(course_id, confirmation, action)
+    return request_api(method, path, data=data)
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -263,6 +285,42 @@ TOOLS: list[dict[str, Any]] = [
             "idempotentHint": False,
         },
     },
+    {
+        "name": "canvas_create_module",
+        "description": "Create exactly one Canvas module in an approved course. Disabled by default and requires explicit confirmation.",
+        "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "name": {"type": "string", "minLength": 1, "maxLength": 255}, "published": {"type": "boolean", "default": False}, "position": {"type": "integer", "minimum": 1}, "confirmation": {"type": "string"}}, "required": ["course_id", "name", "confirmation"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
+        "name": "canvas_create_module_item",
+        "description": "Add one existing Canvas content item or external URL to an existing module in an approved course. Disabled by default and requires explicit confirmation.",
+        "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "module_id": {"type": "integer", "minimum": 1}, "type": {"type": "string", "enum": ["Page", "Assignment", "Discussion", "Quiz", "File", "ExternalUrl"]}, "title": {"type": "string", "minLength": 1, "maxLength": 255}, "content_id": {"type": "integer", "minimum": 1}, "page_url": {"type": "string", "minLength": 1}, "external_url": {"type": "string", "format": "uri"}, "new_tab": {"type": "boolean", "default": False}, "position": {"type": "integer", "minimum": 1}, "confirmation": {"type": "string"}}, "required": ["course_id", "module_id", "type", "title", "confirmation"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
+        "name": "canvas_create_assignment",
+        "description": "Create exactly one Canvas assignment in an approved course. Disabled by default and requires explicit confirmation.",
+        "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "name": {"type": "string", "minLength": 1, "maxLength": 255}, "description": {"type": "string"}, "points_possible": {"type": "number", "minimum": 0}, "submission_types": {"type": "array", "items": {"type": "string"}}, "published": {"type": "boolean", "default": False}, "confirmation": {"type": "string"}}, "required": ["course_id", "name", "confirmation"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
+        "name": "canvas_create_discussion",
+        "description": "Create exactly one Canvas discussion in an approved course. Disabled by default and requires explicit confirmation.",
+        "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "title": {"type": "string", "minLength": 1, "maxLength": 255}, "message": {"type": "string"}, "discussion_type": {"type": "string", "enum": ["threaded", "focused"], "default": "threaded"}, "published": {"type": "boolean", "default": False}, "confirmation": {"type": "string"}}, "required": ["course_id", "title", "message", "confirmation"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
+        "name": "canvas_create_classic_quiz",
+        "description": "Create exactly one Canvas Classic Quiz in an approved course. New Quizzes are not supported by this tool. Disabled by default and requires explicit confirmation.",
+        "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "title": {"type": "string", "minLength": 1, "maxLength": 255}, "description": {"type": "string"}, "quiz_type": {"type": "string", "enum": ["practice_quiz", "assignment", "graded_survey", "survey"], "default": "practice_quiz"}, "published": {"type": "boolean", "default": False}, "confirmation": {"type": "string"}}, "required": ["course_id", "title", "confirmation"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
+        "name": "canvas_create_classic_quiz_question",
+        "description": "Add one question to an existing Canvas Classic Quiz in an approved course. Disabled by default and requires explicit confirmation.",
+        "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "quiz_id": {"type": "integer", "minimum": 1}, "question_name": {"type": "string", "minLength": 1, "maxLength": 255}, "question_text": {"type": "string"}, "question_type": {"type": "string", "enum": ["multiple_choice_question", "true_false_question", "short_answer_question", "essay_question", "multiple_answers_question"]}, "points_possible": {"type": "number", "minimum": 0}, "answers": {"type": "array", "items": {"type": "object"}}, "confirmation": {"type": "string"}}, "required": ["course_id", "quiz_id", "question_name", "question_text", "question_type", "confirmation"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
 ]
 
 
@@ -281,11 +339,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return write_policy()
     if name == "canvas_write_page":
         course_id = require_course_id(args.get("course_id"))
-        require_write_approval(course_id, args.get("confirmation"))
-        title = args.get("title")
+        title = require_text(args.get("title"), "title")
         body = args.get("body")
-        if not isinstance(title, str) or not title.strip() or len(title) > 255:
-            raise ValueError("title must contain 1 to 255 characters.")
         if not isinstance(body, str):
             raise ValueError("body must be a string.")
         page = {
@@ -303,7 +358,98 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         if page_url:
             path += "/" + urllib.parse.quote(page_url, safe="")
             method = "PUT"
-        return request_api(method, path, data={"wiki_page": page})
+        return content_write(course_id, args.get("confirmation"), "PAGE", method, path, {"wiki_page": page})
+    if name == "canvas_create_module":
+        course_id = require_course_id(args.get("course_id"))
+        module: dict[str, Any] = {"name": require_text(args.get("name"), "name"), "published": args.get("published", False)}
+        require_boolean(module["published"], "published")
+        if "position" in args:
+            module["position"] = require_course_id(args["position"])
+        return content_write(course_id, args.get("confirmation"), "MODULE", "POST", f"/api/v1/courses/{course_id}/modules", {"module": module})
+    if name == "canvas_create_module_item":
+        course_id = require_course_id(args.get("course_id"))
+        module_id = require_course_id(args.get("module_id"))
+        item_type = args.get("type")
+        if item_type not in {"Page", "Assignment", "Discussion", "Quiz", "File", "ExternalUrl"}:
+            raise ValueError("type must be a supported Canvas module-item type.")
+        item: dict[str, Any] = {"type": item_type, "title": require_text(args.get("title"), "title")}
+        if "content_id" in args:
+            item["content_id"] = require_course_id(args["content_id"])
+        if "page_url" in args:
+            item["page_url"] = require_text(args["page_url"], "page_url")
+        if "external_url" in args:
+            external_url = args["external_url"]
+            parsed = urllib.parse.urlsplit(external_url) if isinstance(external_url, str) else None
+            if not parsed or parsed.scheme != "https" or not parsed.netloc:
+                raise ValueError("external_url must be an HTTPS URL.")
+            item["external_url"] = external_url
+        if item_type == "Page" and "page_url" not in item:
+            raise ValueError("Page module items require page_url.")
+        if item_type == "ExternalUrl" and "external_url" not in item:
+            raise ValueError("ExternalUrl module items require external_url.")
+        if item_type not in {"Page", "ExternalUrl"} and "content_id" not in item:
+            raise ValueError(f"{item_type} module items require content_id.")
+        if "new_tab" in args:
+            item["new_tab"] = require_boolean(args["new_tab"], "new_tab")
+        if "position" in args:
+            item["position"] = require_course_id(args["position"])
+        return content_write(course_id, args.get("confirmation"), "MODULE ITEM", "POST", f"/api/v1/courses/{course_id}/modules/{module_id}/items", {"module_item": item})
+    if name == "canvas_create_assignment":
+        course_id = require_course_id(args.get("course_id"))
+        assignment: dict[str, Any] = {"name": require_text(args.get("name"), "name"), "published": args.get("published", False)}
+        require_boolean(assignment["published"], "published")
+        for field in ("description", "points_possible", "submission_types"):
+            if field in args:
+                assignment[field] = args[field]
+        if "description" in assignment and not isinstance(assignment["description"], str):
+            raise ValueError("description must be a string.")
+        if "points_possible" in assignment and (isinstance(assignment["points_possible"], bool) or not isinstance(assignment["points_possible"], (int, float)) or assignment["points_possible"] < 0):
+            raise ValueError("points_possible must be a non-negative number.")
+        if "submission_types" in assignment and (not isinstance(assignment["submission_types"], list) or not all(isinstance(value, str) for value in assignment["submission_types"])):
+            raise ValueError("submission_types must be a list of strings.")
+        return content_write(course_id, args.get("confirmation"), "ASSIGNMENT", "POST", f"/api/v1/courses/{course_id}/assignments", {"assignment": assignment})
+    if name == "canvas_create_discussion":
+        course_id = require_course_id(args.get("course_id"))
+        discussion_type = args.get("discussion_type", "threaded")
+        if discussion_type not in {"threaded", "focused"}:
+            raise ValueError("discussion_type must be threaded or focused.")
+        discussion = {"title": require_text(args.get("title"), "title"), "message": args.get("message"), "discussion_type": discussion_type, "published": args.get("published", False)}
+        if not isinstance(discussion["message"], str):
+            raise ValueError("message must be a string.")
+        require_boolean(discussion["published"], "published")
+        return content_write(course_id, args.get("confirmation"), "DISCUSSION", "POST", f"/api/v1/courses/{course_id}/discussion_topics", {"discussion": discussion})
+    if name == "canvas_create_classic_quiz":
+        course_id = require_course_id(args.get("course_id"))
+        quiz_type = args.get("quiz_type", "practice_quiz")
+        if quiz_type not in {"practice_quiz", "assignment", "graded_survey", "survey"}:
+            raise ValueError("quiz_type is not supported.")
+        quiz: dict[str, Any] = {"title": require_text(args.get("title"), "title"), "quiz_type": quiz_type, "published": args.get("published", False)}
+        require_boolean(quiz["published"], "published")
+        if "description" in args:
+            if not isinstance(args["description"], str):
+                raise ValueError("description must be a string.")
+            quiz["description"] = args["description"]
+        return content_write(course_id, args.get("confirmation"), "CLASSIC QUIZ", "POST", f"/api/v1/courses/{course_id}/quizzes", {"quiz": quiz})
+    if name == "canvas_create_classic_quiz_question":
+        course_id = require_course_id(args.get("course_id"))
+        quiz_id = require_course_id(args.get("quiz_id"))
+        question_type = args.get("question_type")
+        allowed_question_types = {"multiple_choice_question", "true_false_question", "short_answer_question", "essay_question", "multiple_answers_question"}
+        if question_type not in allowed_question_types:
+            raise ValueError("question_type is not supported.")
+        question: dict[str, Any] = {"question_name": require_text(args.get("question_name"), "question_name"), "question_text": args.get("question_text"), "question_type": question_type}
+        if not isinstance(question["question_text"], str):
+            raise ValueError("question_text must be a string.")
+        if "points_possible" in args:
+            points = args["points_possible"]
+            if isinstance(points, bool) or not isinstance(points, (int, float)) or points < 0:
+                raise ValueError("points_possible must be a non-negative number.")
+            question["points_possible"] = points
+        if "answers" in args:
+            if not isinstance(args["answers"], list) or not all(isinstance(answer, dict) for answer in args["answers"]):
+                raise ValueError("answers must be a list of objects.")
+            question["answers"] = args["answers"]
+        return content_write(course_id, args.get("confirmation"), "CLASSIC QUIZ QUESTION", "POST", f"/api/v1/courses/{course_id}/quizzes/{quiz_id}/questions", {"question": question})
     raise ValueError("Unknown tool.")
 
 

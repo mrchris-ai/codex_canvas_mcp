@@ -14,7 +14,7 @@ class ServerSafetyTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(server.write_policy(), server.disabled_policy())
             with self.assertRaises(PermissionError):
-                server.require_write_approval(123, "APPROVE CANVAS PAGE WRITE course 123")
+                server.require_write_approval(123, "APPROVE CANVAS PAGE WRITE course 123", "PAGE")
 
     def test_policy_requires_private_permissions(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -32,10 +32,10 @@ class ServerSafetyTests(unittest.TestCase):
         policy = {"version": 1, "enabled": True, "approved_course_ids": [123]}
         with mock.patch.object(server, "write_policy", return_value=policy):
             with self.assertRaises(PermissionError):
-                server.require_write_approval(456, "APPROVE CANVAS PAGE WRITE course 456")
+                server.require_write_approval(456, "APPROVE CANVAS PAGE WRITE course 456", "PAGE")
             with self.assertRaises(PermissionError):
-                server.require_write_approval(123, "yes")
-            server.require_write_approval(123, "APPROVE CANVAS PAGE WRITE course 123")
+                server.require_write_approval(123, "yes", "PAGE")
+            server.require_write_approval(123, "APPROVE CANVAS PAGE WRITE course 123", "PAGE")
 
     def test_read_tool_uses_get_only(self):
         with mock.patch.object(server, "api_get", return_value={"ok": True}) as api_get:
@@ -75,8 +75,20 @@ class ServerSafetyTests(unittest.TestCase):
     def test_tool_annotations_mark_only_page_write_as_mutating(self):
         tools = {tool["name"]: tool for tool in server.TOOLS}
         self.assertTrue(tools["canvas_read_api"]["annotations"]["readOnlyHint"])
-        self.assertFalse(tools["canvas_write_page"]["annotations"]["readOnlyHint"])
-        self.assertTrue(tools["canvas_write_page"]["annotations"]["destructiveHint"])
+        for name in ("canvas_write_page", "canvas_create_module", "canvas_create_module_item", "canvas_create_assignment", "canvas_create_discussion", "canvas_create_classic_quiz", "canvas_create_classic_quiz_question"):
+            self.assertFalse(tools[name]["annotations"]["readOnlyHint"])
+            self.assertTrue(tools[name]["annotations"]["destructiveHint"])
+
+    def test_module_write_uses_the_scoped_endpoint_and_confirmation(self):
+        args = {"course_id": 123, "name": "Week 1", "confirmation": "APPROVE CANVAS MODULE WRITE course 123"}
+        with mock.patch.object(server, "content_write", return_value={"id": 8}) as content_write:
+            result = server.call_tool("canvas_create_module", args)
+        self.assertEqual(result, {"id": 8})
+        content_write.assert_called_once_with(123, args["confirmation"], "MODULE", "POST", "/api/v1/courses/123/modules", {"module": {"name": "Week 1", "published": False}})
+
+    def test_module_item_rejects_missing_reference(self):
+        with self.assertRaises(ValueError):
+            server.call_tool("canvas_create_module_item", {"course_id": 123, "module_id": 8, "type": "Assignment", "title": "Task", "confirmation": "APPROVE CANVAS MODULE ITEM WRITE course 123"})
 
 
 if __name__ == "__main__":

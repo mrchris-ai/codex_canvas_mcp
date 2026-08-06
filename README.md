@@ -1,16 +1,16 @@
 # Codex Canvas MCP
 
-A portable local MCP server that lets compatible clients read Canvas and, only after several independent safety checks, create or update a single Canvas page.
+A portable local MCP server that lets compatible clients read Canvas and, only after several independent safety checks, author common course content.
 
 ## Safety model
 
 - Canvas reads are available by default after local credential setup.
 - Writing is disabled by default.
-- A page write requires an enabled local policy, an exact per-course allowlist match, exact confirmation text, and approval in the MCP client.
+- Every content write requires an enabled local policy, an exact per-course allowlist match, exact confirmation text, and approval in the MCP client.
 - There is no generic Canvas write tool.
 - Credentials stay in 1Password and, optionally, macOS Keychain. They do not belong in this repository or client configuration.
 
-The only write tool is `canvas_write_page`. The server marks it as mutating and destructive so compatible clients can require approval. The local server also rejects the call unless its exact confirmation is `APPROVE CANVAS PAGE WRITE course <course_id>`.
+Every content tool is marked as mutating and destructive so compatible clients can require approval. The local server also rejects a call unless its exact confirmation matches the requested action, for example `APPROVE CANVAS MODULE WRITE course <course_id>`.
 
 ## What is included
 
@@ -21,6 +21,12 @@ The only write tool is `canvas_write_page`. The server marks it as mutating and 
 | `canvas_read_api` | GET a normalized Canvas API v1 path | Available |
 | `canvas_get_write_policy` | Inspect local policy state | Available |
 | `canvas_write_page` | Create or update one page | Blocked |
+| `canvas_create_module` | Create one module | Blocked |
+| `canvas_create_module_item` | Place one content item in a module | Blocked |
+| `canvas_create_assignment` | Create one assignment | Blocked |
+| `canvas_create_discussion` | Create one discussion | Blocked |
+| `canvas_create_classic_quiz` | Create one Classic Quiz | Blocked |
+| `canvas_create_classic_quiz_question` | Add one question to a Classic Quiz | Blocked |
 
 ## Set up a new Mac
 
@@ -90,12 +96,12 @@ This repository implements a local stdio MCP server for Codex and other clients 
 
 See [Developer mode and MCP apps in ChatGPT](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt) before attempting ChatGPT setup; availability and approval behavior can change.
 
-## Enabling the page-write tool
+## Enabling content-authoring tools
 
 Keep writing off unless a specific task requires it.
 
 1. Copy `config/write-policy.example.json` to a location outside the repository.
-2. Add only the exact Canvas course IDs approved for page writing.
+2. Add only the exact Canvas course IDs approved for content authoring.
 3. Set `enabled` to `true` and restrict the file:
 
    ```bash
@@ -104,10 +110,14 @@ Keep writing off unless a specific task requires it.
 
 4. Add `CANVAS_WRITE_POLICY=/absolute/private/path/write-policy.json` to the MCP server environment.
 5. Restart the client and call `canvas_get_write_policy` to verify the effective policy.
-6. For each page write, review the course, title, body, page slug, and published state. Supply the exact confirmation phrase and approve the mutating action in the client.
+6. For each content write, review the exact target and payload. Supply the action-specific confirmation phrase and approve the mutating action in the client.
 7. Disable the policy again when the task is complete.
 
 If the variable is absent, the file is missing, permissions are broader than `0600`, writing is disabled, or the course is not allowlisted, the server refuses the write.
+
+## Current authoring boundary
+
+This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments, Discussions, and Classic Quizzes with questions after the normal policy and approval gates. It does not yet upload local files, create New Quizzes, or perform account/course administration. File upload requires a separate payload-specific approval design so the MCP never sends an unintended local file to Canvas.
 
 ## Development
 

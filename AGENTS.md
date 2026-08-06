@@ -8,8 +8,8 @@ These rules apply to the entire repository.
 - Never inspect a developer's live credentials during routine tests. Unit tests must mock credential and network boundaries.
 - Read access is the default capability. Keep all reads on `GET` requests to normalized `/api/v1/` paths.
 - Writing is disabled when no policy is configured, when the policy is missing, or when the course is not allowlisted.
-- The only permitted write tool is the narrowly scoped Canvas page create/update tool. Do not add a generic write or arbitrary-method API tool.
-- Every page write must pass all three gates: local policy enabled for that exact course, exact confirmation text, and client-side approval of the mutating MCP action.
+- Permitted content-authoring tools may create or update only Pages, Modules, module items, Assignments, Discussions, and Classic Quizzes with their questions. Do not add a generic write, arbitrary-method API tool, local-file upload tool, enrollment tool, or administrative API tool.
+- Every content write must pass all three gates: local policy enabled for that exact course, exact confirmation text, and client-side approval of the mutating MCP action.
 - Keep write-tool annotations accurate (`readOnlyHint: false`, `destructiveHint: true`). Never disguise a mutation as a read.
 - Do not ship an enabled policy or a real course ID. Example policy files must remain disabled with an empty allowlist.
 - Do not weaken TLS validation or credential subprocess isolation.
@@ -20,7 +20,7 @@ These rules apply to the entire repository.
 - Keep dependencies minimal and pinned only as tightly as maintainability requires.
 - Add or update tests for every security-boundary change.
 - Before committing, run the unit tests, compile the package, inspect the staged diff, and scan tracked content for credential-like strings.
-- Administrative Canvas features belong in `ROADMAP.md` until separately designed, reviewed, and authorized.
+- Administrative Canvas features (enrollments, course creation, cross-listing, roles, account operations, and settings) belong in `ROADMAP.md` until separately designed, reviewed, and authorized.
 
 ## Verification
 
