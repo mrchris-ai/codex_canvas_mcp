@@ -417,7 +417,7 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         if not isinstance(discussion["message"], str):
             raise ValueError("message must be a string.")
         require_boolean(discussion["published"], "published")
-        return content_write(course_id, args.get("confirmation"), "DISCUSSION", "POST", f"/api/v1/courses/{course_id}/discussion_topics", {"discussion": discussion})
+        return content_write(course_id, args.get("confirmation"), "DISCUSSION", "POST", f"/api/v1/courses/{course_id}/discussion_topics", discussion)
     if name == "canvas_create_classic_quiz":
         course_id = require_course_id(args.get("course_id"))
         quiz_type = args.get("quiz_type", "practice_quiz")

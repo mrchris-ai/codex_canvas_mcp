@@ -90,6 +90,12 @@ class ServerSafetyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             server.call_tool("canvas_create_module_item", {"course_id": 123, "module_id": 8, "type": "Assignment", "title": "Task", "confirmation": "APPROVE CANVAS MODULE ITEM WRITE course 123"})
 
+    def test_discussion_write_uses_canvas_top_level_payload(self):
+        args = {"course_id": 123, "title": "Discussion", "message": "<p>Prompt</p>", "confirmation": "APPROVE CANVAS DISCUSSION WRITE course 123"}
+        with mock.patch.object(server, "content_write", return_value={"id": 4}) as content_write:
+            server.call_tool("canvas_create_discussion", args)
+        content_write.assert_called_once_with(123, args["confirmation"], "DISCUSSION", "POST", "/api/v1/courses/123/discussion_topics", {"title": "Discussion", "message": "<p>Prompt</p>", "discussion_type": "threaded", "published": False})
+
 
 if __name__ == "__main__":
     unittest.main()
