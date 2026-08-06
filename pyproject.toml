@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-canvas-mcp"
+version = "0.1.0"
+description = "A portable, security-focused local Canvas MCP server"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["certifi>=2024.2.2"]
+
+[project.scripts]
+codex-canvas-mcp = "canvas_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
