@@ -7,10 +7,13 @@ A portable local MCP server that lets compatible clients read Canvas and, only a
 - Canvas reads are available by default after local credential setup.
 - Writing is disabled by default.
 - Every content write requires an enabled local policy, an exact per-course allowlist match, exact confirmation text, and approval in the MCP client.
+- Image upload adds a payload gate: only a locally owned PNG, JPEG, or WebP inside one configured trusted folder, no larger than 10 MiB, can be sent.
 - There is no generic Canvas write tool.
 - Credentials stay in 1Password and, optionally, macOS Keychain. They do not belong in this repository or client configuration.
 
 Every content tool is marked as mutating and destructive so compatible clients can require approval. The local server also rejects a call unless its exact confirmation matches the requested action, for example `APPROVE CANVAS MODULE WRITE course <course_id>`.
+
+Rubric creation accepts a same-origin Canvas assignment URL, an assignment module-item URL, or a course URL containing an `assignment_id` query parameter. Query strings and fragments are ignored after the course and assignment are resolved. The URL never bypasses course policy: its course ID must still be explicitly allowlisted, and rubric creation requires `APPROVE CANVAS RUBRIC WRITE course <course_id>`. The tool refuses to replace an existing assignment rubric, requires descriptions for every criterion and rating, and requires grading-rubric points to match the assignment points.
 
 ## What is included
 
@@ -20,13 +23,20 @@ Every content tool is marked as mutating and destructive so compatible clients c
 | `canvas_list_modules` | Read modules and items for one course | Available |
 | `canvas_read_api` | GET a normalized Canvas API v1 path | Available |
 | `canvas_get_write_policy` | Inspect local policy state | Available |
+| `canvas_upload_image` | Upload one verified image from the configured trusted folder | Blocked |
 | `canvas_write_page` | Create or update one page | Blocked |
 | `canvas_create_module` | Create one module | Blocked |
 | `canvas_create_module_item` | Place one content item in a module | Blocked |
 | `canvas_create_assignment` | Create one assignment | Blocked |
+| `canvas_create_assignment_rubric` | Create and attach one assignment rubric from a Canvas URL | Blocked |
 | `canvas_create_discussion` | Create one discussion | Blocked |
 | `canvas_create_classic_quiz` | Create one Classic Quiz | Blocked |
 | `canvas_create_classic_quiz_question` | Add one question to a Classic Quiz | Blocked |
+| `canvas_delete_page` | Delete one page | Blocked |
+| `canvas_delete_assignment` | Delete one assignment | Blocked |
+| `canvas_delete_discussion` | Delete one discussion | Blocked |
+| `canvas_delete_classic_quiz` | Delete one Classic Quiz | Blocked |
+| `canvas_delete_module` | Delete one module and its item placements | Blocked |
 
 ## Set up a new Mac
 
@@ -64,6 +74,7 @@ Prerequisites: Python 3.11 or newer, the [1Password CLI](https://developer.1pass
    | `CANVAS_OP_FIELD` | Concealed token field label; defaults to `credential` |
    | `CANVAS_KEYCHAIN_SERVICE` | macOS Keychain service label when not using `OP_SERVICE_ACCOUNT_TOKEN` |
    | `CANVAS_KEYCHAIN_ACCOUNT` | macOS Keychain account label when not using `OP_SERVICE_ACCOUNT_TOKEN` |
+   | `CANVAS_IMAGE_UPLOAD_ROOT` | Absolute path to the only local folder from which image upload is allowed |
 
 5. Test only the protocol and security gates, without contacting Canvas or reading credentials:
 
@@ -86,6 +97,7 @@ Prerequisites: Python 3.11 or newer, the [1Password CLI](https://developer.1pass
    CANVAS_OP_FIELD = "credential"
    CANVAS_KEYCHAIN_SERVICE = "your-service-label"
    CANVAS_KEYCHAIN_ACCOUNT = "your-account-label"
+   CANVAS_IMAGE_UPLOAD_ROOT = "/absolute/path/to/reviewed/canvas-images"
    ```
 
    Put this in the trusted project's `.codex/config.toml` or your personal Codex configuration. Do not add secret values. Restart or open a new task after changing MCP configuration, then verify the listed tools before requesting Canvas data.
@@ -115,11 +127,18 @@ Keep writing off unless a specific task requires it.
 
 If the variable is absent, the file is missing, permissions are broader than `0600`, writing is disabled, or the course is not allowlisted, the server refuses the write.
 
+### Enabling image upload
+
+Image upload uses the same local write policy and exact course allowlist, plus `CANVAS_IMAGE_UPLOAD_ROOT`. The tool refuses relative paths, symlinks, files outside that root, files not owned by the current user, unsupported image types, files whose binary signature disagrees with the extension, and files larger than 10 MiB. The exact confirmation is `APPROVE CANVAS IMAGE UPLOAD course <course_id>`.
+
+Canvas uses a documented three-step upload exchange: initialize the course file through the authenticated API, send the image without the Canvas access token to Canvas's returned HTTPS storage URL, and authenticate the returned same-origin Canvas completion location. The tool then reads `/api/v1/courses/<course_id>/files/<file_id>` and checks the MIME type and size before returning a persistent course preview path. It never returns storage signatures or the file-download verifier URL.
+
 ## Current authoring boundary
 
-This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments, Discussions, and Classic Quizzes with questions after the normal policy and approval gates. It does not yet upload local files, create New Quizzes, or perform account/course administration. File upload requires a separate payload-specific approval design so the MCP never sends an unintended local file to Canvas.
+This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, and Modules; deleting a Module removes its item placements but not the underlying course content. Its only local-file capability is the payload-gated image uploader described above. Generic file upload, New Quizzes, and account/course administration remain unsupported.
 
 See [`docs/2026-08-06-content-authoring-extension.md`](docs/2026-08-06-content-authoring-extension.md) for the implementation and end-to-end validation record.
+See [`docs/2026-08-16-image-upload-extension.md`](docs/2026-08-16-image-upload-extension.md) for the image-upload threat model and validation record.
 
 ## Development
 

@@ -8,8 +8,8 @@ These rules apply to the entire repository.
 - Never inspect a developer's live credentials during routine tests. Unit tests must mock credential and network boundaries.
 - Read access is the default capability. Keep all reads on `GET` requests to normalized `/api/v1/` paths.
 - Writing is disabled when no policy is configured, when the policy is missing, or when the course is not allowlisted.
-- Permitted content-authoring tools may create or update only Pages, Modules, module items, Assignments, Discussions, and Classic Quizzes with their questions. Do not add a generic write, arbitrary-method API tool, local-file upload tool, enrollment tool, or administrative API tool.
-- Every content write must pass all three gates: local policy enabled for that exact course, exact confirmation text, and client-side approval of the mutating MCP action.
+- Permitted content-authoring tools may create, update, or delete only Pages, Modules, module items, Assignments, assignment Rubrics, Discussions, and Classic Quizzes with their questions. Deletion tools must be resource-specific. The sole local-payload exception is the image-only upload tool: it must remain limited to PNG, JPEG, and WebP files no larger than 10 MiB, rooted under `CANVAS_IMAGE_UPLOAD_ROOT`, and separately confirmed for the exact course. Do not add a generic write, arbitrary-method API tool, generic local-file upload tool, enrollment tool, or administrative API tool.
+- Every content write must pass all three gates: local policy enabled for that exact course, exact confirmation text, and client-side approval of the mutating MCP action. Image upload must additionally validate the trusted local root, regular-file ownership, filename, size, extension, binary signature, storage URL, and same-origin Canvas completion URL.
 - Keep write-tool annotations accurate (`readOnlyHint: false`, `destructiveHint: true`). Never disguise a mutation as a read.
 - Do not ship an enabled policy or a real course ID. Example policy files must remain disabled with an empty allowlist.
 - Do not weaken TLS validation or credential subprocess isolation.

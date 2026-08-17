@@ -8,8 +8,12 @@ repository files, included in tool output, or logged.
 from __future__ import annotations
 
 import json
+import ipaddress
+import math
 import os
 from pathlib import Path
+import re
+import secrets
 import ssl
 import subprocess
 import sys
@@ -21,8 +25,15 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.5.0"
 PROTOCOL_VERSION = "2025-03-26"
+MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
+IMAGE_CONTENT_TYPES = {
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
 
 
 class ConfigurationError(RuntimeError):
@@ -121,7 +132,7 @@ def request_api(
     query: dict[str, Any] | None = None,
     data: dict[str, Any] | None = None,
 ) -> Any:
-    if method not in {"GET", "POST", "PUT"}:
+    if method not in {"GET", "POST", "PUT", "DELETE"}:
         raise ValueError("Unsupported HTTP method.")
     url = canvas_base_url() + validate_api_path(path)
     if query:
@@ -201,6 +212,28 @@ def require_write_approval(course_id: int, confirmation: Any, action: str) -> No
         raise PermissionError(f"Confirmation must exactly match: {expected}")
 
 
+def require_delete_approval(course_id: int, confirmation: Any, resource: str) -> None:
+    policy = write_policy()
+    if not policy["enabled"] or course_id not in policy["approved_course_ids"]:
+        raise PermissionError(
+            "Canvas writing is disabled or this course is not approved by the local policy."
+        )
+    expected = f"APPROVE CANVAS {resource.upper()} DELETE course {course_id}"
+    if confirmation != expected:
+        raise PermissionError(f"Confirmation must exactly match: {expected}")
+
+
+def require_image_upload_approval(course_id: int, confirmation: Any) -> None:
+    policy = write_policy()
+    if not policy["enabled"] or course_id not in policy["approved_course_ids"]:
+        raise PermissionError(
+            "Canvas writing is disabled or this course is not approved by the local policy."
+        )
+    expected = f"APPROVE CANVAS IMAGE UPLOAD course {course_id}"
+    if confirmation != expected:
+        raise PermissionError(f"Confirmation must exactly match: {expected}")
+
+
 def require_text(value: Any, name: str, maximum: int = 255) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > maximum:
         raise ValueError(f"{name} must contain 1 to {maximum} characters.")
@@ -213,9 +246,372 @@ def require_boolean(value: Any, name: str) -> bool:
     return value
 
 
+def require_number(value: Any, name: str, *, minimum: float = 0) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < minimum
+    ):
+        raise ValueError(f"{name} must be a number greater than or equal to {minimum}.")
+    return float(value)
+
+
+def image_upload_root() -> Path:
+    configured = required_env("CANVAS_IMAGE_UPLOAD_ROOT")
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        raise ConfigurationError("CANVAS_IMAGE_UPLOAD_ROOT must be an absolute path.")
+    if path.is_symlink():
+        raise ConfigurationError("CANVAS_IMAGE_UPLOAD_ROOT must not be a symbolic link.")
+    try:
+        resolved = path.resolve(strict=True)
+        stat = resolved.stat()
+    except OSError as exc:
+        raise ConfigurationError("CANVAS_IMAGE_UPLOAD_ROOT is unavailable.") from exc
+    if not resolved.is_dir():
+        raise ConfigurationError("CANVAS_IMAGE_UPLOAD_ROOT must be a directory.")
+    if hasattr(os, "getuid") and stat.st_uid != os.getuid():
+        raise ConfigurationError("CANVAS_IMAGE_UPLOAD_ROOT must be owned by the current user.")
+    return resolved
+
+
+def validate_image_file(value: Any) -> tuple[Path, str, int]:
+    file_path = Path(require_text(value, "file_path", 4096)).expanduser()
+    if not file_path.is_absolute():
+        raise ValueError("file_path must be an absolute path.")
+    if file_path.is_symlink():
+        raise ValueError("file_path must not be a symbolic link.")
+    try:
+        resolved = file_path.resolve(strict=True)
+        stat = resolved.stat()
+    except OSError as exc:
+        raise ValueError("file_path must identify an available image file.") from exc
+    root = image_upload_root()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise PermissionError("file_path must be inside CANVAS_IMAGE_UPLOAD_ROOT.") from exc
+    if not resolved.is_file():
+        raise ValueError("file_path must identify a regular file.")
+    if hasattr(os, "getuid") and stat.st_uid != os.getuid():
+        raise PermissionError("The image file must be owned by the current user.")
+    if stat.st_size <= 0 or stat.st_size > MAX_IMAGE_UPLOAD_BYTES:
+        raise ValueError("The image must be between 1 byte and 10 MiB.")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}", resolved.name):
+        raise ValueError("The image filename may contain only letters, numbers, dot, underscore, and hyphen.")
+    content_type = IMAGE_CONTENT_TYPES.get(resolved.suffix.lower())
+    if content_type is None:
+        raise ValueError("Only PNG, JPEG, and WebP images may be uploaded.")
+    with resolved.open("rb") as handle:
+        header = handle.read(12)
+    signatures_match = {
+        "image/jpeg": header.startswith(b"\xff\xd8\xff"),
+        "image/png": header.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/webp": header.startswith(b"RIFF") and header[8:12] == b"WEBP",
+    }
+    if not signatures_match[content_type]:
+        raise ValueError("The image contents do not match the filename extension.")
+    return resolved, content_type, stat.st_size
+
+
+def validate_upload_url(value: Any) -> str:
+    if not isinstance(value, str):
+        raise RuntimeError("Canvas returned an invalid image upload URL.")
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.fragment:
+        raise RuntimeError("Canvas returned an unsafe image upload URL.")
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if hostname == "localhost" or hostname.endswith((".localhost", ".local")):
+        raise RuntimeError("Canvas returned an unsafe image upload host.")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        if not address.is_global:
+            raise RuntimeError("Canvas returned an unsafe image upload host.")
+    return value
+
+
+def multipart_image_body(
+    upload_params: Any,
+    image_path: Path,
+    content_type: str,
+) -> tuple[bytes, str]:
+    if not isinstance(upload_params, dict) or not upload_params:
+        raise RuntimeError("Canvas returned no image upload parameters.")
+    boundary = "----codex-canvas-" + secrets.token_hex(16)
+    body = bytearray()
+    for raw_name, raw_value in upload_params.items():
+        if not isinstance(raw_name, str) or not isinstance(raw_value, str):
+            raise RuntimeError("Canvas returned invalid image upload parameters.")
+        if any(character in raw_name for character in ('\r', '\n', '"')):
+            raise RuntimeError("Canvas returned an unsafe image upload parameter name.")
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(
+            f'Content-Disposition: form-data; name="{raw_name}"\r\n\r\n'.encode("utf-8")
+        )
+        body.extend(raw_value.encode("utf-8"))
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}\r\n".encode("ascii"))
+    body.extend(
+        (
+            f'Content-Disposition: form-data; name="file"; filename="{image_path.name}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode("utf-8")
+    )
+    body.extend(image_path.read_bytes())
+    body.extend(f"\r\n--{boundary}--\r\n".encode("ascii"))
+    return bytes(body), boundary
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
+
+
+def post_image_payload(
+    upload_url: Any,
+    upload_params: Any,
+    image_path: Path,
+    content_type: str,
+) -> tuple[int, str | None]:
+    url = validate_upload_url(upload_url)
+    body, boundary = multipart_image_body(upload_params, image_path, content_type)
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": f"{SERVER_NAME}/{SERVER_VERSION}",
+        },
+    )
+    context = ssl.create_default_context(cafile=certifi.where())
+    opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=context))
+    try:
+        with opener.open(request, timeout=60) as response:
+            return response.status, response.headers.get("Location")
+    except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return exc.code, exc.headers.get("Location")
+        raise RuntimeError(f"Canvas image storage returned HTTP {exc.code} {exc.reason}.") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError("Canvas image storage connection failed.") from exc
+
+
+def request_canvas_location(method: str, location: Any) -> Any:
+    if not isinstance(location, str):
+        raise RuntimeError("Canvas image upload did not provide a completion location.")
+    parsed = urllib.parse.urlsplit(location)
+    configured = urllib.parse.urlsplit(canvas_base_url())
+    if parsed.scheme or parsed.netloc:
+        if parsed.scheme != configured.scheme or parsed.netloc.lower() != configured.netloc.lower():
+            raise RuntimeError("Canvas image upload returned a completion location outside Canvas.")
+    if parsed.username or parsed.password or parsed.fragment:
+        raise RuntimeError("Canvas image upload returned an unsafe completion location.")
+    path = validate_api_path(parsed.path)
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True) or None
+    return request_api(method, path, query=query)
+
+
+def upload_canvas_image(args: dict[str, Any]) -> dict[str, Any]:
+    course_id = require_course_id(args.get("course_id"))
+    require_image_upload_approval(course_id, args.get("confirmation"))
+    image_path, content_type, size = validate_image_file(args.get("file_path"))
+    initial = request_api(
+        "POST",
+        f"/api/v1/courses/{course_id}/files",
+        data={
+            "name": image_path.name,
+            "size": size,
+            "content_type": content_type,
+            "on_duplicate": "rename",
+        },
+    )
+    if not isinstance(initial, dict):
+        raise RuntimeError("Canvas returned an invalid image upload response.")
+    status, location = post_image_payload(
+        initial.get("upload_url"),
+        initial.get("upload_params"),
+        image_path,
+        content_type,
+    )
+    if 300 <= status < 400:
+        created = request_canvas_location("POST", location)
+    elif status == 201:
+        created = request_canvas_location("GET", location)
+    else:
+        raise RuntimeError(f"Canvas image storage returned unexpected HTTP {status}.")
+    if not isinstance(created, dict):
+        raise RuntimeError("Canvas returned an invalid completed image upload.")
+    file_id = require_course_id(created.get("id"))
+    verified = api_get(f"/api/v1/courses/{course_id}/files/{file_id}")
+    if not isinstance(verified, dict):
+        raise RuntimeError("Canvas returned invalid image verification data.")
+    verified_type = verified.get("content-type") or verified.get("content_type")
+    if verified_type != content_type or verified.get("size") != size:
+        raise RuntimeError("Canvas image verification did not match the local image.")
+    return {
+        "id": file_id,
+        "display_name": verified.get("display_name"),
+        "filename": verified.get("filename"),
+        "content_type": verified_type,
+        "size": verified.get("size"),
+        "folder_id": verified.get("folder_id"),
+        "canvas_path": f"/courses/{course_id}/files/{file_id}/preview",
+    }
+
+
+def parse_assignment_url(value: Any) -> tuple[int, int | None, int | None]:
+    assignment_url = require_text(value, "assignment_url", 2048)
+    parsed = urllib.parse.urlsplit(assignment_url)
+    configured = urllib.parse.urlsplit(canvas_base_url())
+    if parsed.username or parsed.password:
+        raise ValueError("assignment_url must not contain credentials.")
+    if parsed.scheme or parsed.netloc:
+        if parsed.scheme != configured.scheme or parsed.netloc.lower() != configured.netloc.lower():
+            raise ValueError("assignment_url must use the configured Canvas origin.")
+    elif not parsed.path.startswith("/"):
+        raise ValueError("assignment_url must be an absolute Canvas URL or root-relative path.")
+
+    assignment_match = re.fullmatch(
+        r"/courses/([1-9][0-9]*)/assignments/([1-9][0-9]*)(?:/.*)?",
+        parsed.path.rstrip("/"),
+    )
+    if assignment_match:
+        course_id, assignment_id = (int(value) for value in assignment_match.groups())
+        query_assignment_ids = urllib.parse.parse_qs(parsed.query).get("assignment_id", [])
+        if query_assignment_ids and any(value != str(assignment_id) for value in query_assignment_ids):
+            raise ValueError("assignment_url contains conflicting assignment IDs.")
+        return course_id, assignment_id, None
+
+    module_item_match = re.fullmatch(
+        r"/courses/([1-9][0-9]*)/modules/items/([1-9][0-9]*)(?:/.*)?",
+        parsed.path.rstrip("/"),
+    )
+    if module_item_match:
+        course_id, module_item_id = (int(value) for value in module_item_match.groups())
+        return course_id, None, module_item_id
+
+    course_match = re.match(r"^/courses/([1-9][0-9]*)(?:/|$)", parsed.path)
+    query_assignment_ids = urllib.parse.parse_qs(parsed.query).get("assignment_id", [])
+    if course_match and len(query_assignment_ids) == 1 and query_assignment_ids[0].isdigit() and int(query_assignment_ids[0]) > 0:
+        return int(course_match.group(1)), int(query_assignment_ids[0]), None
+    raise ValueError(
+        "assignment_url must identify a Canvas assignment directly, through a module item, "
+        "or with an assignment_id query parameter."
+    )
+
+
+def rubric_payload(criteria: Any) -> tuple[dict[str, Any], float]:
+    if not isinstance(criteria, list) or not 1 <= len(criteria) <= 50:
+        raise ValueError("criteria must contain between 1 and 50 rubric criteria.")
+    normalized: dict[str, Any] = {}
+    total_points = 0.0
+    for criterion_index, criterion in enumerate(criteria):
+        if not isinstance(criterion, dict):
+            raise ValueError("Each rubric criterion must be an object.")
+        if set(criterion) != {"description", "long_description", "points", "ratings"}:
+            raise ValueError("Each rubric criterion must contain only description, long_description, points, and ratings.")
+        points = require_number(criterion["points"], f"criteria[{criterion_index}].points")
+        ratings = criterion["ratings"]
+        if not isinstance(ratings, list) or not 2 <= len(ratings) <= 20:
+            raise ValueError("Each rubric criterion must contain between 2 and 20 ratings.")
+        normalized_ratings: dict[str, Any] = {}
+        seen_rating_points: set[float] = set()
+        ordered_ratings: list[tuple[str, str, float]] = []
+        for rating_index, rating in enumerate(ratings):
+            if not isinstance(rating, dict) or set(rating) != {"description", "long_description", "points"}:
+                raise ValueError("Each rubric rating must contain only description, long_description, and points.")
+            rating_points = require_number(
+                rating["points"],
+                f"criteria[{criterion_index}].ratings[{rating_index}].points",
+            )
+            if rating_points > points:
+                raise ValueError("A rubric rating cannot exceed its criterion points.")
+            if rating_points in seen_rating_points:
+                raise ValueError("Rating point values must be unique within each criterion.")
+            seen_rating_points.add(rating_points)
+            ordered_ratings.append(
+                (
+                    require_text(rating["description"], "rating description"),
+                    require_text(rating["long_description"], "rating long_description", 2000),
+                    rating_points,
+                )
+            )
+        for rating_index, (description, long_description, rating_points) in enumerate(
+            sorted(ordered_ratings, key=lambda item: item[2], reverse=True)
+        ):
+            normalized_ratings[str(rating_index)] = {
+                "description": description,
+                "long_description": long_description,
+                "points": rating_points,
+            }
+        normalized[str(criterion_index)] = {
+            "description": require_text(criterion["description"], "criterion description"),
+            "long_description": require_text(criterion["long_description"], "criterion long_description", 5000),
+            "points": points,
+            "criterion_use_range": False,
+            "ratings": normalized_ratings,
+        }
+        total_points += points
+    return normalized, total_points
+
+
+def create_assignment_rubric(args: dict[str, Any]) -> Any:
+    course_id, assignment_id, module_item_id = parse_assignment_url(args.get("assignment_url"))
+    require_write_approval(course_id, args.get("confirmation"), "RUBRIC")
+    if module_item_id is not None:
+        module_item = api_get(f"/api/v1/courses/{course_id}/modules/items/{module_item_id}")
+        if module_item.get("type") != "Assignment":
+            raise ValueError("The Canvas module-item URL does not identify an assignment.")
+        assignment_id = require_course_id(module_item.get("content_id"))
+    if assignment_id is None:
+        raise ValueError("Could not resolve an assignment from assignment_url.")
+
+    assignment = api_get(
+        f"/api/v1/courses/{course_id}/assignments/{assignment_id}",
+        {"include[]": ["rubric", "rubric_settings"]},
+    )
+    if assignment.get("rubric_settings") or assignment.get("rubric"):
+        raise ValueError("The target assignment already has a rubric; this tool will not replace it.")
+
+    use_for_grading = args.get("use_for_grading", True)
+    require_boolean(use_for_grading, "use_for_grading")
+    criteria, total_points = rubric_payload(args.get("criteria"))
+    assignment_points = assignment.get("points_possible")
+    if use_for_grading and isinstance(assignment_points, (int, float)) and not isinstance(assignment_points, bool):
+        if abs(float(assignment_points) - total_points) > 0.000001:
+            raise ValueError("A grading rubric's total points must match the assignment points.")
+
+    payload = {
+        "rubric": {
+            "title": require_text(args.get("title"), "title"),
+            "free_form_criterion_comments": False,
+            "criteria": criteria,
+        },
+        "rubric_association": {
+            "association_id": assignment_id,
+            "association_type": "Assignment",
+            "use_for_grading": use_for_grading,
+            "hide_score_total": False,
+            "purpose": "grading",
+        },
+    }
+    return request_api("POST", f"/api/v1/courses/{course_id}/rubrics", data=payload)
+
+
 def content_write(course_id: int, confirmation: Any, action: str, method: str, path: str, data: dict[str, Any]) -> Any:
     require_write_approval(course_id, confirmation, action)
     return request_api(method, path, data=data)
+
+
+def content_delete(course_id: int, confirmation: Any, resource: str, path: str) -> Any:
+    require_delete_approval(course_id, confirmation, resource)
+    return request_api("DELETE", path)
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -255,6 +651,29 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Show write-policy state and approved course IDs. Does not expose credentials.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": {"readOnlyHint": True},
+    },
+    {
+        "name": "canvas_upload_image",
+        "description": (
+            "Upload exactly one locally verified PNG, JPEG, or WebP image to an approved Canvas "
+            "course. The file must be inside CANVAS_IMAGE_UPLOAD_ROOT and no larger than 10 MiB. "
+            "Disabled by default and requires exact image-upload confirmation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "course_id": {"type": "integer", "minimum": 1},
+                "file_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "confirmation": {"type": "string"},
+            },
+            "required": ["course_id", "file_path", "confirmation"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+        },
     },
     {
         "name": "canvas_write_page",
@@ -304,6 +723,57 @@ TOOLS: list[dict[str, Any]] = [
         "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
     },
     {
+        "name": "canvas_create_assignment_rubric",
+        "description": (
+            "Create and attach exactly one rubric to an assignment in an approved course. "
+            "Accepts a same-origin Canvas assignment URL, assignment module-item URL, or course URL "
+            "containing assignment_id. Query strings and fragments are supported. Refuses to replace "
+            "an existing rubric. Disabled by default and requires explicit confirmation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "assignment_url": {"type": "string", "minLength": 1, "maxLength": 2048},
+                "title": {"type": "string", "minLength": 1, "maxLength": 255},
+                "criteria": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "description": {"type": "string", "minLength": 1, "maxLength": 255},
+                            "long_description": {"type": "string", "minLength": 1, "maxLength": 5000},
+                            "points": {"type": "number", "minimum": 0},
+                            "ratings": {
+                                "type": "array",
+                                "minItems": 2,
+                                "maxItems": 20,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "description": {"type": "string", "minLength": 1, "maxLength": 255},
+                                        "long_description": {"type": "string", "minLength": 1, "maxLength": 2000},
+                                        "points": {"type": "number", "minimum": 0},
+                                    },
+                                    "required": ["description", "long_description", "points"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["description", "long_description", "points", "ratings"],
+                        "additionalProperties": False,
+                    },
+                },
+                "use_for_grading": {"type": "boolean", "default": True},
+                "confirmation": {"type": "string"},
+            },
+            "required": ["assignment_url", "title", "criteria", "confirmation"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
         "name": "canvas_create_discussion",
         "description": "Create exactly one Canvas discussion in an approved course. Disabled by default and requires explicit confirmation.",
         "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "title": {"type": "string", "minLength": 1, "maxLength": 255}, "message": {"type": "string"}, "discussion_type": {"type": "string", "enum": ["threaded", "focused"], "default": "threaded"}, "published": {"type": "boolean", "default": False}, "confirmation": {"type": "string"}}, "required": ["course_id", "title", "message", "confirmation"], "additionalProperties": False},
@@ -319,6 +789,36 @@ TOOLS: list[dict[str, Any]] = [
         "name": "canvas_create_classic_quiz_question",
         "description": "Add one question to an existing Canvas Classic Quiz in an approved course. Disabled by default and requires explicit confirmation.",
         "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "quiz_id": {"type": "integer", "minimum": 1}, "question_name": {"type": "string", "minLength": 1, "maxLength": 255}, "question_text": {"type": "string"}, "question_type": {"type": "string", "enum": ["multiple_choice_question", "true_false_question", "short_answer_question", "essay_question", "multiple_answers_question"]}, "points_possible": {"type": "number", "minimum": 0}, "answers": {"type": "array", "items": {"type": "object"}}, "confirmation": {"type": "string"}}, "required": ["course_id", "quiz_id", "question_name", "question_text", "question_type", "confirmation"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
+        "name": "canvas_delete_page",
+        "description": "Delete exactly one Canvas page in an approved course. Requires the exact page slug and explicit confirmation.",
+        "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "page_url": {"type": "string", "minLength": 1}, "confirmation": {"type": "string"}}, "required": ["course_id", "page_url", "confirmation"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
+        "name": "canvas_delete_assignment",
+        "description": "Delete exactly one Canvas assignment in an approved course. Requires the exact assignment ID and explicit confirmation.",
+        "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "assignment_id": {"type": "integer", "minimum": 1}, "confirmation": {"type": "string"}}, "required": ["course_id", "assignment_id", "confirmation"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
+        "name": "canvas_delete_discussion",
+        "description": "Delete exactly one Canvas discussion in an approved course. Requires the exact discussion ID and explicit confirmation.",
+        "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "discussion_id": {"type": "integer", "minimum": 1}, "confirmation": {"type": "string"}}, "required": ["course_id", "discussion_id", "confirmation"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
+        "name": "canvas_delete_classic_quiz",
+        "description": "Delete exactly one Canvas Classic Quiz in an approved course. Requires the exact quiz ID and explicit confirmation.",
+        "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "quiz_id": {"type": "integer", "minimum": 1}, "confirmation": {"type": "string"}}, "required": ["course_id", "quiz_id", "confirmation"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
+        "name": "canvas_delete_module",
+        "description": "Delete exactly one Canvas module and its module-item placements in an approved course. Underlying course content is not deleted automatically.",
+        "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "module_id": {"type": "integer", "minimum": 1}, "confirmation": {"type": "string"}}, "required": ["course_id", "module_id", "confirmation"], "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
     },
 ]
@@ -337,6 +837,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return api_get(args.get("path"), args.get("query"))
     if name == "canvas_get_write_policy":
         return write_policy()
+    if name == "canvas_upload_image":
+        return upload_canvas_image(args)
     if name == "canvas_write_page":
         course_id = require_course_id(args.get("course_id"))
         title = require_text(args.get("title"), "title")
@@ -408,6 +910,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         if "submission_types" in assignment and (not isinstance(assignment["submission_types"], list) or not all(isinstance(value, str) for value in assignment["submission_types"])):
             raise ValueError("submission_types must be a list of strings.")
         return content_write(course_id, args.get("confirmation"), "ASSIGNMENT", "POST", f"/api/v1/courses/{course_id}/assignments", {"assignment": assignment})
+    if name == "canvas_create_assignment_rubric":
+        return create_assignment_rubric(args)
     if name == "canvas_create_discussion":
         course_id = require_course_id(args.get("course_id"))
         discussion_type = args.get("discussion_type", "threaded")
@@ -450,6 +954,26 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
                 raise ValueError("answers must be a list of objects.")
             question["answers"] = args["answers"]
         return content_write(course_id, args.get("confirmation"), "CLASSIC QUIZ QUESTION", "POST", f"/api/v1/courses/{course_id}/quizzes/{quiz_id}/questions", {"question": question})
+    if name == "canvas_delete_page":
+        course_id = require_course_id(args.get("course_id"))
+        page_url = require_text(args.get("page_url"), "page_url")
+        return content_delete(course_id, args.get("confirmation"), "PAGE", f"/api/v1/courses/{course_id}/pages/{urllib.parse.quote(page_url, safe='')}")
+    if name == "canvas_delete_assignment":
+        course_id = require_course_id(args.get("course_id"))
+        assignment_id = require_course_id(args.get("assignment_id"))
+        return content_delete(course_id, args.get("confirmation"), "ASSIGNMENT", f"/api/v1/courses/{course_id}/assignments/{assignment_id}")
+    if name == "canvas_delete_discussion":
+        course_id = require_course_id(args.get("course_id"))
+        discussion_id = require_course_id(args.get("discussion_id"))
+        return content_delete(course_id, args.get("confirmation"), "DISCUSSION", f"/api/v1/courses/{course_id}/discussion_topics/{discussion_id}")
+    if name == "canvas_delete_classic_quiz":
+        course_id = require_course_id(args.get("course_id"))
+        quiz_id = require_course_id(args.get("quiz_id"))
+        return content_delete(course_id, args.get("confirmation"), "CLASSIC QUIZ", f"/api/v1/courses/{course_id}/quizzes/{quiz_id}")
+    if name == "canvas_delete_module":
+        course_id = require_course_id(args.get("course_id"))
+        module_id = require_course_id(args.get("module_id"))
+        return content_delete(course_id, args.get("confirmation"), "MODULE", f"/api/v1/courses/{course_id}/modules/{module_id}")
     raise ValueError("Unknown tool.")
 
 
@@ -470,8 +994,9 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                 "instructions": (
-                    "Canvas reads are available after local credential setup. Page writing is "
-                    "disabled unless a secure local per-course policy enables it. Never reveal credentials."
+                    "Canvas reads are available after local credential setup. Content writing and "
+                    "image upload are disabled unless secure local policy and payload gates enable them. "
+                    "Never reveal credentials."
                 ),
             },
         }
