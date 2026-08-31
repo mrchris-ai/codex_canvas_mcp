@@ -36,6 +36,18 @@ def sample_rubric_args(assignment_url: str = "https://canvas.example.edu/courses
     }
 
 
+def sample_course_rubric() -> dict:
+    return {
+        "id": 789,
+        "title": "Duplicate Rubric (1)",
+        "context_id": 123,
+        "context_type": "Course",
+        "points_possible": 4.0,
+        "read_only": False,
+        "data": [{"id": "criterion_1", "description": "Analysis", "points": 4.0}],
+    }
+
+
 def write_sample_png(path: Path) -> None:
     path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"sample-image-data")
 
@@ -67,6 +79,48 @@ class ServerSafetyTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 server.require_write_approval(123, "yes", "PAGE")
             server.require_write_approval(123, "APPROVE CANVAS PAGE WRITE course 123", "PAGE")
+
+    def test_rubric_delete_requires_exact_course_and_rubric_confirmation(self):
+        policy = {
+            "version": 2,
+            "enabled": True,
+            "approved_course_ids": [456],
+            "approved_rubric_delete_course_ids": [123],
+        }
+        with mock.patch.object(server, "write_policy", return_value=policy):
+            with self.assertRaises(PermissionError):
+                server.require_rubric_delete_approval(
+                    456,
+                    789,
+                    "APPROVE CANVAS RUBRIC DELETE course 456 rubric 789",
+                )
+            with self.assertRaises(PermissionError):
+                server.require_rubric_delete_approval(123, 789, "yes")
+            server.require_rubric_delete_approval(
+                123,
+                789,
+                "APPROVE CANVAS RUBRIC DELETE course 123 rubric 789",
+            )
+
+    def test_rubric_delete_allowlist_does_not_enable_content_writes(self):
+        policy = {
+            "version": 2,
+            "enabled": True,
+            "approved_course_ids": [],
+            "approved_rubric_delete_course_ids": [123],
+        }
+        with mock.patch.object(server, "write_policy", return_value=policy):
+            server.require_rubric_delete_approval(
+                123,
+                789,
+                "APPROVE CANVAS RUBRIC DELETE course 123 rubric 789",
+            )
+            with self.assertRaises(PermissionError):
+                server.require_write_approval(
+                    123,
+                    "APPROVE CANVAS PAGE WRITE course 123",
+                    "PAGE",
+                )
 
     def test_image_upload_requires_exact_confirmation_and_allowlist(self):
         policy = {"version": 1, "enabled": True, "approved_course_ids": [123]}
@@ -255,7 +309,8 @@ class ServerSafetyTests(unittest.TestCase):
     def test_tool_annotations_mark_only_page_write_as_mutating(self):
         tools = {tool["name"]: tool for tool in server.TOOLS}
         self.assertTrue(tools["canvas_read_api"]["annotations"]["readOnlyHint"])
-        for name in ("canvas_upload_image", "canvas_write_page", "canvas_create_module", "canvas_create_module_item", "canvas_create_assignment", "canvas_create_assignment_rubric", "canvas_create_discussion", "canvas_create_classic_quiz", "canvas_create_classic_quiz_question", "canvas_delete_page", "canvas_delete_assignment", "canvas_delete_discussion", "canvas_delete_classic_quiz", "canvas_delete_module"):
+        self.assertTrue(tools["canvas_inspect_rubric"]["annotations"]["readOnlyHint"])
+        for name in ("canvas_upload_image", "canvas_write_page", "canvas_create_module", "canvas_create_module_item", "canvas_create_assignment", "canvas_create_assignment_rubric", "canvas_delete_rubric", "canvas_create_discussion", "canvas_create_classic_quiz", "canvas_create_classic_quiz_question", "canvas_delete_page", "canvas_delete_assignment", "canvas_delete_discussion", "canvas_delete_classic_quiz", "canvas_delete_module"):
             self.assertFalse(tools[name]["annotations"]["readOnlyHint"])
             self.assertTrue(tools[name]["annotations"]["destructiveHint"])
 
@@ -368,6 +423,76 @@ class ServerSafetyTests(unittest.TestCase):
         args["criteria"][0]["points"] = float("nan")
         with self.assertRaises(ValueError):
             server.rubric_payload(args["criteria"])
+
+    def test_rubric_inspection_returns_backup_and_deletion_preflight(self):
+        rubric = sample_course_rubric()
+        with (
+            mock.patch.object(server, "find_course_rubric", return_value=rubric),
+            mock.patch.object(server, "api_get", return_value=[]) as api_get,
+        ):
+            result = server.call_tool(
+                "canvas_inspect_rubric",
+                {"course_id": 123, "rubric_id": 789},
+            )
+        api_get.assert_called_once_with(
+            "/api/v1/courses/123/rubrics/789/used_locations"
+        )
+        self.assertTrue(result["deletion_ready"])
+        self.assertEqual(result["criteria_count"], 1)
+        self.assertEqual(result["backup"], rubric)
+
+    def test_rubric_delete_rechecks_title_usage_and_active_list(self):
+        rubric = sample_course_rubric()
+        args = {
+            "course_id": 123,
+            "rubric_id": 789,
+            "expected_title": "Duplicate Rubric (1)",
+            "confirmation": "APPROVE CANVAS RUBRIC DELETE course 123 rubric 789",
+        }
+        with (
+            mock.patch.object(server, "require_rubric_delete_approval") as approval,
+            mock.patch.object(
+                server,
+                "find_course_rubric",
+                side_effect=[rubric, None],
+            ),
+            mock.patch.object(server, "api_get", return_value=[]),
+            mock.patch.object(
+                server,
+                "request_api",
+                return_value={"id": 789, "workflow_state": "deleted"},
+            ) as request_api,
+        ):
+            result = server.call_tool("canvas_delete_rubric", args)
+        approval.assert_called_once_with(123, 789, args["confirmation"])
+        request_api.assert_called_once_with(
+            "DELETE",
+            "/api/v1/courses/123/rubrics/789",
+        )
+        self.assertTrue(result["deleted"])
+        self.assertEqual(result["backup"], rubric)
+
+    def test_rubric_delete_refuses_any_live_usage_location(self):
+        rubric = sample_course_rubric()
+        args = {
+            "course_id": 123,
+            "rubric_id": 789,
+            "expected_title": "Duplicate Rubric (1)",
+            "confirmation": "APPROVE CANVAS RUBRIC DELETE course 123 rubric 789",
+        }
+        with (
+            mock.patch.object(server, "require_rubric_delete_approval"),
+            mock.patch.object(server, "find_course_rubric", return_value=rubric),
+            mock.patch.object(
+                server,
+                "api_get",
+                return_value=[{"course_id": 123, "assignment_id": 456}],
+            ),
+            mock.patch.object(server, "request_api") as request_api,
+        ):
+            with self.assertRaises(PermissionError):
+                server.call_tool("canvas_delete_rubric", args)
+        request_api.assert_not_called()
 
     def test_delete_requires_exact_confirmation_and_allowlist(self):
         policy = {"version": 1, "enabled": True, "approved_course_ids": [123]}

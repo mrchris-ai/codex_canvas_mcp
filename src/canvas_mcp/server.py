@@ -25,7 +25,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.5.0"
+SERVER_VERSION = "0.6.0"
 PROTOCOL_VERSION = "2025-03-26"
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 IMAGE_CONTENT_TYPES = {
@@ -125,6 +125,25 @@ def validate_api_path(path: str) -> str:
     return parsed.path
 
 
+def canvas_http_error_detail(exc: urllib.error.HTTPError) -> str:
+    """Return a short Canvas-authored error without echoing arbitrary response content."""
+    try:
+        payload = json.loads(exc.read(8192).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    details = {
+        key: payload[key]
+        for key in ("message", "error", "errors")
+        if key in payload
+    }
+    if not details:
+        return ""
+    rendered = json.dumps(details, ensure_ascii=True, separators=(",", ":"))
+    return rendered[:1000]
+
+
 def request_api(
     method: str,
     path: str,
@@ -151,7 +170,11 @@ def request_api(
         with urllib.request.urlopen(request, timeout=30, context=context) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"Canvas API returned HTTP {exc.code} {exc.reason}.") from exc
+        detail = canvas_http_error_detail(exc)
+        suffix = f" Details: {detail}" if detail else ""
+        raise RuntimeError(
+            f"Canvas API returned HTTP {exc.code} {exc.reason}.{suffix}"
+        ) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError("Canvas API connection failed.") from exc
 
@@ -161,7 +184,12 @@ def api_get(path: str, query: dict[str, Any] | None = None) -> Any:
 
 
 def disabled_policy() -> dict[str, Any]:
-    return {"version": 1, "enabled": False, "approved_course_ids": []}
+    return {
+        "version": 2,
+        "enabled": False,
+        "approved_course_ids": [],
+        "approved_rubric_delete_course_ids": [],
+    }
 
 
 def write_policy() -> dict[str, Any]:
@@ -181,9 +209,15 @@ def write_policy() -> dict[str, Any]:
         policy = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ConfigurationError("The Canvas write policy is unreadable or invalid JSON.") from exc
-    if set(policy) != {"version", "enabled", "approved_course_ids"}:
+    if not isinstance(policy, dict):
+        raise ConfigurationError("The Canvas write policy must be a JSON object.")
+    version = policy.get("version")
+    expected_keys = {"version", "enabled", "approved_course_ids"}
+    if version == 2:
+        expected_keys.add("approved_rubric_delete_course_ids")
+    if set(policy) != expected_keys:
         raise ConfigurationError("The Canvas write policy contains unexpected keys.")
-    if policy["version"] != 1 or not isinstance(policy["enabled"], bool):
+    if version not in {1, 2} or not isinstance(policy["enabled"], bool):
         raise ConfigurationError("The Canvas write policy has invalid version or enabled values.")
     course_ids = policy["approved_course_ids"]
     if not isinstance(course_ids, list) or any(
@@ -192,7 +226,24 @@ def write_policy() -> dict[str, Any]:
         raise ConfigurationError("approved_course_ids must contain only positive integers.")
     if len(course_ids) != len(set(course_ids)):
         raise ConfigurationError("approved_course_ids must not contain duplicates.")
-    return policy
+    rubric_delete_course_ids = policy.get("approved_rubric_delete_course_ids", [])
+    if not isinstance(rubric_delete_course_ids, list) or any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        for value in rubric_delete_course_ids
+    ):
+        raise ConfigurationError(
+            "approved_rubric_delete_course_ids must contain only positive integers."
+        )
+    if len(rubric_delete_course_ids) != len(set(rubric_delete_course_ids)):
+        raise ConfigurationError(
+            "approved_rubric_delete_course_ids must not contain duplicates."
+        )
+    return {
+        "version": 2,
+        "enabled": policy["enabled"],
+        "approved_course_ids": course_ids,
+        "approved_rubric_delete_course_ids": rubric_delete_course_ids,
+    }
 
 
 def require_course_id(value: Any) -> int:
@@ -223,6 +274,25 @@ def require_delete_approval(course_id: int, confirmation: Any, resource: str) ->
         raise PermissionError(f"Confirmation must exactly match: {expected}")
 
 
+def require_rubric_delete_approval(
+    course_id: int,
+    rubric_id: int,
+    confirmation: Any,
+) -> None:
+    policy = write_policy()
+    if (
+        not policy["enabled"]
+        or course_id not in policy.get("approved_rubric_delete_course_ids", [])
+    ):
+        raise PermissionError(
+            "Canvas rubric deletion is disabled or this course is not approved by the "
+            "operation-specific local policy."
+        )
+    expected = f"APPROVE CANVAS RUBRIC DELETE course {course_id} rubric {rubric_id}"
+    if confirmation != expected:
+        raise PermissionError(f"Confirmation must exactly match: {expected}")
+
+
 def require_image_upload_approval(course_id: int, confirmation: Any) -> None:
     policy = write_policy()
     if not policy["enabled"] or course_id not in policy["approved_course_ids"]:
@@ -237,6 +307,12 @@ def require_image_upload_approval(course_id: int, confirmation: Any) -> None:
 def require_text(value: Any, name: str, maximum: int = 255) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > maximum:
         raise ValueError(f"{name} must contain 1 to {maximum} characters.")
+    return value
+
+
+def require_positive_id(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
     return value
 
 
@@ -604,6 +680,98 @@ def create_assignment_rubric(args: dict[str, Any]) -> Any:
     return request_api("POST", f"/api/v1/courses/{course_id}/rubrics", data=payload)
 
 
+def find_course_rubric(
+    course_id: int,
+    rubric_id: int,
+    *,
+    required: bool = True,
+) -> dict[str, Any] | None:
+    """Find one active course rubric without relying on Canvas's fragile show route."""
+    for page in range(1, 11):
+        rubrics = api_get(
+            f"/api/v1/courses/{course_id}/rubrics",
+            {"per_page": 100, "page": page},
+        )
+        if not isinstance(rubrics, list):
+            raise RuntimeError("Canvas returned an invalid course-rubric list.")
+        for rubric in rubrics:
+            if isinstance(rubric, dict) and rubric.get("id") == rubric_id:
+                return rubric
+        if len(rubrics) < 100:
+            break
+    if required:
+        raise ValueError(
+            f"Rubric {rubric_id} was not found among the active rubrics in course {course_id}."
+        )
+    return None
+
+
+def inspect_course_rubric(course_id: int, rubric_id: int) -> dict[str, Any]:
+    rubric = find_course_rubric(course_id, rubric_id)
+    assert rubric is not None
+    used_locations = api_get(
+        f"/api/v1/courses/{course_id}/rubrics/{rubric_id}/used_locations"
+    )
+    if not isinstance(used_locations, list):
+        raise RuntimeError("Canvas returned invalid rubric usage-location data.")
+
+    blockers: list[str] = []
+    if rubric.get("context_type") != "Course" or rubric.get("context_id") != course_id:
+        blockers.append("The rubric is not owned by the requested course.")
+    if rubric.get("read_only") is True:
+        blockers.append("Canvas reports that this rubric is read-only.")
+    if used_locations:
+        blockers.append(
+            "The rubric is still used by one or more Canvas courses or assignments."
+        )
+
+    return {
+        "course_id": course_id,
+        "rubric_id": rubric_id,
+        "title": rubric.get("title"),
+        "points_possible": rubric.get("points_possible"),
+        "criteria_count": len(rubric.get("data") or []),
+        "read_only": rubric.get("read_only"),
+        "used_locations": used_locations,
+        "deletion_ready": not blockers,
+        "deletion_blockers": blockers,
+        "backup": rubric,
+    }
+
+
+def delete_course_rubric(args: dict[str, Any]) -> dict[str, Any]:
+    course_id = require_course_id(args.get("course_id"))
+    rubric_id = require_positive_id(args.get("rubric_id"), "rubric_id")
+    expected_title = require_text(args.get("expected_title"), "expected_title")
+    require_rubric_delete_approval(course_id, rubric_id, args.get("confirmation"))
+
+    snapshot = inspect_course_rubric(course_id, rubric_id)
+    if snapshot["title"] != expected_title:
+        raise ValueError(
+            f"Rubric title mismatch: expected {expected_title!r}, Canvas returned {snapshot['title']!r}."
+        )
+    if not snapshot["deletion_ready"]:
+        raise PermissionError(
+            "Rubric deletion preflight failed: " + " ".join(snapshot["deletion_blockers"])
+        )
+
+    response = request_api(
+        "DELETE",
+        f"/api/v1/courses/{course_id}/rubrics/{rubric_id}",
+    )
+    if find_course_rubric(course_id, rubric_id, required=False) is not None:
+        raise RuntimeError("Canvas reported success, but the rubric remains in the active course list.")
+    return {
+        "deleted": True,
+        "course_id": course_id,
+        "rubric_id": rubric_id,
+        "title": expected_title,
+        "used_locations_before_delete": snapshot["used_locations"],
+        "backup": snapshot["backup"],
+        "canvas_response": response,
+    }
+
+
 def content_write(course_id: int, confirmation: Any, action: str, method: str, path: str, data: dict[str, Any]) -> Any:
     require_write_approval(course_id, confirmation, action)
     return request_api(method, path, data=data)
@@ -642,6 +810,24 @@ TOOLS: list[dict[str, Any]] = [
                 "query": {"type": "object"},
             },
             "required": ["path"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": True},
+    },
+    {
+        "name": "canvas_inspect_rubric",
+        "description": (
+            "Inspect one exact course-owned rubric, its complete definition, and every Canvas "
+            "course or assignment where it is used. Reports whether zero-dependency deletion "
+            "preflight passes. Read-only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "course_id": {"type": "integer", "minimum": 1},
+                "rubric_id": {"type": "integer", "minimum": 1},
+            },
+            "required": ["course_id", "rubric_id"],
             "additionalProperties": False,
         },
         "annotations": {"readOnlyHint": True},
@@ -774,6 +960,26 @@ TOOLS: list[dict[str, Any]] = [
         "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
     },
     {
+        "name": "canvas_delete_rubric",
+        "description": (
+            "Delete exactly one course-owned rubric only after live preflight confirms the exact "
+            "title, course ownership, editable state, and zero Canvas usage locations. Requires "
+            "the exact course and rubric IDs in the confirmation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "course_id": {"type": "integer", "minimum": 1},
+                "rubric_id": {"type": "integer", "minimum": 1},
+                "expected_title": {"type": "string", "minLength": 1, "maxLength": 255},
+                "confirmation": {"type": "string"},
+            },
+            "required": ["course_id", "rubric_id", "expected_title", "confirmation"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
         "name": "canvas_create_discussion",
         "description": "Create exactly one Canvas discussion in an approved course. Disabled by default and requires explicit confirmation.",
         "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "title": {"type": "string", "minLength": 1, "maxLength": 255}, "message": {"type": "string"}, "discussion_type": {"type": "string", "enum": ["threaded", "focused"], "default": "threaded"}, "published": {"type": "boolean", "default": False}, "confirmation": {"type": "string"}}, "required": ["course_id", "title", "message", "confirmation"], "additionalProperties": False},
@@ -835,6 +1041,10 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         )
     if name == "canvas_read_api":
         return api_get(args.get("path"), args.get("query"))
+    if name == "canvas_inspect_rubric":
+        course_id = require_course_id(args.get("course_id"))
+        rubric_id = require_positive_id(args.get("rubric_id"), "rubric_id")
+        return inspect_course_rubric(course_id, rubric_id)
     if name == "canvas_get_write_policy":
         return write_policy()
     if name == "canvas_upload_image":
@@ -912,6 +1122,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return content_write(course_id, args.get("confirmation"), "ASSIGNMENT", "POST", f"/api/v1/courses/{course_id}/assignments", {"assignment": assignment})
     if name == "canvas_create_assignment_rubric":
         return create_assignment_rubric(args)
+    if name == "canvas_delete_rubric":
+        return delete_course_rubric(args)
     if name == "canvas_create_discussion":
         course_id = require_course_id(args.get("course_id"))
         discussion_type = args.get("discussion_type", "threaded")

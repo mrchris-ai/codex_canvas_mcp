@@ -13,6 +13,8 @@ A portable local MCP server that lets compatible clients read Canvas and, only a
 
 Every content tool is marked as mutating and destructive so compatible clients can require approval. The local server also rejects a call unless its exact confirmation matches the requested action, for example `APPROVE CANVAS MODULE WRITE course <course_id>`.
 
+Rubric maintenance uses a separate operation-specific course allowlist and a stronger identity gate. `canvas_delete_rubric` requires `APPROVE CANVAS RUBRIC DELETE course <course_id> rubric <rubric_id>`, an exact expected title, course ownership, editable state, and an empty live `used_locations` result. Authorizing rubric deletion does not authorize any page, assignment, module, discussion, or quiz write. The tool returns the complete pre-deletion rubric definition and verifies that the rubric no longer appears in the active course list.
+
 Rubric creation accepts a same-origin Canvas assignment URL, an assignment module-item URL, or a course URL containing an `assignment_id` query parameter. Query strings and fragments are ignored after the course and assignment are resolved. The URL never bypasses course policy: its course ID must still be explicitly allowlisted, and rubric creation requires `APPROVE CANVAS RUBRIC WRITE course <course_id>`. The tool refuses to replace an existing assignment rubric, requires descriptions for every criterion and rating, and requires grading-rubric points to match the assignment points.
 
 ## What is included
@@ -22,6 +24,7 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_get_current_user` | Read the authenticated profile | Available |
 | `canvas_list_modules` | Read modules and items for one course | Available |
 | `canvas_read_api` | GET a normalized Canvas API v1 path | Available |
+| `canvas_inspect_rubric` | Read one rubric, its complete definition, usage locations, and deletion preflight | Available |
 | `canvas_get_write_policy` | Inspect local policy state | Available |
 | `canvas_upload_image` | Upload one verified image from the configured trusted folder | Blocked |
 | `canvas_write_page` | Create or update one page | Blocked |
@@ -37,6 +40,7 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_delete_discussion` | Delete one discussion | Blocked |
 | `canvas_delete_classic_quiz` | Delete one Classic Quiz | Blocked |
 | `canvas_delete_module` | Delete one module and its item placements | Blocked |
+| `canvas_delete_rubric` | Delete one exact, course-owned rubric only when Canvas reports zero usage locations | Blocked |
 
 ## Set up a new Mac
 
@@ -113,7 +117,7 @@ See [Developer mode and MCP apps in ChatGPT](https://help.openai.com/en/articles
 Keep writing off unless a specific task requires it.
 
 1. Copy `config/write-policy.example.json` to a location outside the repository.
-2. Add only the exact Canvas course IDs approved for content authoring.
+2. Add only the exact Canvas course IDs approved for content authoring to `approved_course_ids`. Add courses approved only for zero-dependency rubric deletion to `approved_rubric_delete_course_ids`; this does not enable other course writes.
 3. Set `enabled` to `true` and restrict the file:
 
    ```bash
@@ -135,10 +139,11 @@ Canvas uses a documented three-step upload exchange: initialize the course file 
 
 ## Current authoring boundary
 
-This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, and Modules; deleting a Module removes its item placements but not the underlying course content. Its only local-file capability is the payload-gated image uploader described above. Generic file upload, New Quizzes, and account/course administration remain unsupported.
+This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its only local-file capability is the payload-gated image uploader described above. Generic file upload, New Quizzes, enrollments, cross-listing, provisioning, and account/course administration remain unsupported.
 
 See [`docs/2026-08-06-content-authoring-extension.md`](docs/2026-08-06-content-authoring-extension.md) for the implementation and end-to-end validation record.
 See [`docs/2026-08-16-image-upload-extension.md`](docs/2026-08-16-image-upload-extension.md) for the image-upload threat model and validation record.
+See [`docs/2026-08-24-support-maintenance-extension.md`](docs/2026-08-24-support-maintenance-extension.md) for the first support-maintenance tool contract and validation record.
 
 ## Development
 

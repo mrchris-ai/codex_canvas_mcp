@@ -37,6 +37,7 @@ Each future feature needs its own narrow tool contract, least-privilege credenti
 - Report stale content, broken links, unpublished items, and configuration drift using reads first.
 - Keep fixes resource-specific and reviewable.
 - Add export/backup evidence before any bulk maintenance operation.
+- Course-rubric inspection and deletion are implemented only for one exact, course-owned, editable rubric with zero Canvas-reported usage locations. Association removal, assessed-rubric deletion, account-owned rubric deletion, archiving, restoration, and bulk rubric maintenance remain deferred.
 
 ## Explicit non-goals
 
