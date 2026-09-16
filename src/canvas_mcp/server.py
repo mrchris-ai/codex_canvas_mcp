@@ -11,6 +11,7 @@ import json
 import ipaddress
 import math
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
 import re
 import secrets
@@ -25,7 +26,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.6.0"
+SERVER_VERSION = "0.7.0"
 PROTOCOL_VERSION = "2025-03-26"
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 IMAGE_CONTENT_TYPES = {
@@ -263,6 +264,24 @@ def require_write_approval(course_id: int, confirmation: Any, action: str) -> No
         raise PermissionError(f"Confirmation must exactly match: {expected}")
 
 
+def require_assignment_update_approval(
+    course_id: int,
+    assignment_id: int,
+    confirmation: Any,
+) -> None:
+    policy = write_policy()
+    if not policy["enabled"] or course_id not in policy["approved_course_ids"]:
+        raise PermissionError(
+            "Canvas writing is disabled or this course is not approved by the local policy."
+        )
+    expected = (
+        f"APPROVE CANVAS ASSIGNMENT UPDATE course {course_id} "
+        f"assignment {assignment_id}"
+    )
+    if confirmation != expected:
+        raise PermissionError(f"Confirmation must exactly match: {expected}")
+
+
 def require_delete_approval(course_id: int, confirmation: Any, resource: str) -> None:
     policy = write_policy()
     if not policy["enabled"] or course_id not in policy["approved_course_ids"]:
@@ -320,6 +339,21 @@ def require_boolean(value: Any, name: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{name} must be a boolean.")
     return value
+
+
+def require_iso8601_datetime(value: Any, name: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be an ISO 8601 datetime.")
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an ISO 8601 datetime.") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{name} must include a timezone.")
+    return parsed
 
 
 def require_number(value: Any, name: str, *, minimum: float = 0) -> float:
@@ -777,6 +811,108 @@ def content_write(course_id: int, confirmation: Any, action: str, method: str, p
     return request_api(method, path, data=data)
 
 
+def set_announcement_three_day_window(args: dict[str, Any]) -> dict[str, Any]:
+    course_id = require_course_id(args.get("course_id"))
+    announcement_id = require_positive_id(args.get("announcement_id"), "announcement_id")
+    confirmation = args.get("confirmation")
+    require_write_approval(course_id, confirmation, "ANNOUNCEMENT WINDOW")
+    path = f"/api/v1/courses/{course_id}/discussion_topics/{announcement_id}"
+    announcement = api_get(path)
+    if not isinstance(announcement, dict) or announcement.get("id") != announcement_id:
+        raise RuntimeError("Canvas returned an unexpected announcement record.")
+    if announcement.get("is_announcement") is not True:
+        raise ValueError("The requested discussion topic is not an announcement.")
+    posted_at = require_iso8601_datetime(announcement.get("posted_at"), "posted_at")
+    display_until = posted_at + timedelta(days=3)
+    display_until_text = display_until.isoformat(timespec="seconds")
+    if display_until_text.endswith("+00:00"):
+        display_until_text = display_until_text[:-6] + "Z"
+    request_api("PUT", path, data={"lock_at": display_until_text})
+    verified = api_get(path)
+    if not isinstance(verified, dict) or verified.get("id") != announcement_id:
+        raise RuntimeError("Canvas returned an unexpected announcement during verification.")
+    saved_lock_at = require_iso8601_datetime(verified.get("lock_at"), "lock_at")
+    if saved_lock_at != display_until:
+        raise RuntimeError("Canvas did not save the expected three-day display-until value.")
+    return {
+        "course_id": course_id,
+        "announcement_id": announcement_id,
+        "title": verified.get("title"),
+        "posted_at": announcement.get("posted_at"),
+        "previous_lock_at": announcement.get("lock_at"),
+        "lock_at": verified.get("lock_at"),
+        "verified": True,
+    }
+
+
+def update_assignment_description(args: dict[str, Any]) -> dict[str, Any]:
+    course_id = require_course_id(args.get("course_id"))
+    assignment_id = require_positive_id(args.get("assignment_id"), "assignment_id")
+    expected_name = require_text(args.get("expected_name"), "expected_name")
+    description = args.get("description")
+    if not isinstance(description, str):
+        raise ValueError("description must be a string.")
+    require_assignment_update_approval(
+        course_id,
+        assignment_id,
+        args.get("confirmation"),
+    )
+
+    path = f"/api/v1/courses/{course_id}/assignments/{assignment_id}"
+    before = api_get(path)
+    if not isinstance(before, dict) or before.get("id") != assignment_id:
+        raise RuntimeError("Canvas returned an unexpected assignment record.")
+    if before.get("name") != expected_name:
+        raise ValueError(
+            f"Assignment name mismatch: expected {expected_name!r}, "
+            f"Canvas returned {before.get('name')!r}."
+        )
+
+    preserved_fields = (
+        "name",
+        "points_possible",
+        "submission_types",
+        "published",
+        "workflow_state",
+        "due_at",
+        "lock_at",
+        "unlock_at",
+        "assignment_group_id",
+    )
+    preserved_before = {
+        field: before[field] for field in preserved_fields if field in before
+    }
+
+    request_api("PUT", path, data={"assignment": {"description": description}})
+    after = api_get(path)
+    if not isinstance(after, dict) or after.get("id") != assignment_id:
+        raise RuntimeError("Canvas returned an unexpected assignment during verification.")
+    if after.get("name") != expected_name:
+        raise RuntimeError("Canvas changed the assignment name unexpectedly.")
+    if after.get("description") != description:
+        raise RuntimeError("Canvas did not save the expected assignment description.")
+
+    changed_fields = {
+        field: {"before": preserved_before[field], "after": after.get(field)}
+        for field in preserved_before
+        if after.get(field) != preserved_before[field]
+    }
+    if changed_fields:
+        changed_names = ", ".join(sorted(changed_fields))
+        raise RuntimeError(
+            "Canvas changed protected assignment settings unexpectedly: " + changed_names
+        )
+
+    return {
+        "course_id": course_id,
+        "assignment_id": assignment_id,
+        "name": expected_name,
+        "description_length": len(description),
+        "preserved_settings": preserved_before,
+        "verified": True,
+    }
+
+
 def content_delete(course_id: int, confirmation: Any, resource: str, path: str) -> Any:
     require_delete_approval(course_id, confirmation, resource)
     return request_api("DELETE", path)
@@ -909,6 +1045,37 @@ TOOLS: list[dict[str, Any]] = [
         "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
     },
     {
+        "name": "canvas_update_assignment",
+        "description": (
+            "Update only the description of one existing Canvas assignment after verifying its "
+            "exact ID and name. Reads the assignment back and verifies that protected settings "
+            "did not change. Disabled by default and requires target-specific confirmation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "course_id": {"type": "integer", "minimum": 1},
+                "assignment_id": {"type": "integer", "minimum": 1},
+                "expected_name": {"type": "string", "minLength": 1, "maxLength": 255},
+                "description": {"type": "string"},
+                "confirmation": {"type": "string"},
+            },
+            "required": [
+                "course_id",
+                "assignment_id",
+                "expected_name",
+                "description",
+                "confirmation",
+            ],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+        },
+    },
+    {
         "name": "canvas_create_assignment_rubric",
         "description": (
             "Create and attach exactly one rubric to an assignment in an approved course. "
@@ -984,6 +1151,29 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Create exactly one Canvas discussion in an approved course. Disabled by default and requires explicit confirmation.",
         "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "title": {"type": "string", "minLength": 1, "maxLength": 255}, "message": {"type": "string"}, "discussion_type": {"type": "string", "enum": ["threaded", "focused"], "default": "threaded"}, "published": {"type": "boolean", "default": False}, "confirmation": {"type": "string"}}, "required": ["course_id", "title", "message", "confirmation"], "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
+        "name": "canvas_set_announcement_three_day_window",
+        "description": (
+            "Set one existing Canvas announcement's display-until value to exactly 72 hours "
+            "after its live posted_at timestamp. Verifies the target is an announcement and "
+            "reads the saved value back. Disabled by default and requires explicit confirmation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "course_id": {"type": "integer", "minimum": 1},
+                "announcement_id": {"type": "integer", "minimum": 1},
+                "confirmation": {"type": "string"},
+            },
+            "required": ["course_id", "announcement_id", "confirmation"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+        },
     },
     {
         "name": "canvas_create_classic_quiz",
@@ -1120,6 +1310,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         if "submission_types" in assignment and (not isinstance(assignment["submission_types"], list) or not all(isinstance(value, str) for value in assignment["submission_types"])):
             raise ValueError("submission_types must be a list of strings.")
         return content_write(course_id, args.get("confirmation"), "ASSIGNMENT", "POST", f"/api/v1/courses/{course_id}/assignments", {"assignment": assignment})
+    if name == "canvas_update_assignment":
+        return update_assignment_description(args)
     if name == "canvas_create_assignment_rubric":
         return create_assignment_rubric(args)
     if name == "canvas_delete_rubric":
@@ -1134,6 +1326,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
             raise ValueError("message must be a string.")
         require_boolean(discussion["published"], "published")
         return content_write(course_id, args.get("confirmation"), "DISCUSSION", "POST", f"/api/v1/courses/{course_id}/discussion_topics", discussion)
+    if name == "canvas_set_announcement_three_day_window":
+        return set_announcement_three_day_window(args)
     if name == "canvas_create_classic_quiz":
         course_id = require_course_id(args.get("course_id"))
         quiz_type = args.get("quiz_type", "practice_quiz")

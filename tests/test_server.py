@@ -310,7 +310,7 @@ class ServerSafetyTests(unittest.TestCase):
         tools = {tool["name"]: tool for tool in server.TOOLS}
         self.assertTrue(tools["canvas_read_api"]["annotations"]["readOnlyHint"])
         self.assertTrue(tools["canvas_inspect_rubric"]["annotations"]["readOnlyHint"])
-        for name in ("canvas_upload_image", "canvas_write_page", "canvas_create_module", "canvas_create_module_item", "canvas_create_assignment", "canvas_create_assignment_rubric", "canvas_delete_rubric", "canvas_create_discussion", "canvas_create_classic_quiz", "canvas_create_classic_quiz_question", "canvas_delete_page", "canvas_delete_assignment", "canvas_delete_discussion", "canvas_delete_classic_quiz", "canvas_delete_module"):
+        for name in ("canvas_upload_image", "canvas_write_page", "canvas_create_module", "canvas_create_module_item", "canvas_create_assignment", "canvas_update_assignment", "canvas_create_assignment_rubric", "canvas_delete_rubric", "canvas_create_discussion", "canvas_set_announcement_three_day_window", "canvas_create_classic_quiz", "canvas_create_classic_quiz_question", "canvas_delete_page", "canvas_delete_assignment", "canvas_delete_discussion", "canvas_delete_classic_quiz", "canvas_delete_module"):
             self.assertFalse(tools[name]["annotations"]["readOnlyHint"])
             self.assertTrue(tools[name]["annotations"]["destructiveHint"])
 
@@ -330,6 +330,180 @@ class ServerSafetyTests(unittest.TestCase):
         with mock.patch.object(server, "content_write", return_value={"id": 4}) as content_write:
             server.call_tool("canvas_create_discussion", args)
         content_write.assert_called_once_with(123, args["confirmation"], "DISCUSSION", "POST", "/api/v1/courses/123/discussion_topics", {"title": "Discussion", "message": "<p>Prompt</p>", "discussion_type": "threaded", "published": False})
+
+    def test_announcement_window_uses_live_posted_at_and_verifies_saved_value(self):
+        args = {
+            "course_id": 123,
+            "announcement_id": 9,
+            "confirmation": "APPROVE CANVAS ANNOUNCEMENT WINDOW WRITE course 123",
+        }
+        before = {
+            "id": 9,
+            "title": "Update",
+            "is_announcement": True,
+            "posted_at": "2026-08-24T12:00:17Z",
+            "lock_at": None,
+        }
+        after = {**before, "lock_at": "2026-08-27T12:00:17Z"}
+        with (
+            mock.patch.object(server, "require_write_approval") as require_write_approval,
+            mock.patch.object(server, "api_get", side_effect=[before, after]) as api_get,
+            mock.patch.object(server, "request_api", return_value=after) as request_api,
+        ):
+            result = server.call_tool("canvas_set_announcement_three_day_window", args)
+        require_write_approval.assert_called_once_with(
+            123,
+            args["confirmation"],
+            "ANNOUNCEMENT WINDOW",
+        )
+        self.assertEqual(api_get.call_count, 2)
+        request_api.assert_called_once_with(
+            "PUT",
+            "/api/v1/courses/123/discussion_topics/9",
+            data={"lock_at": "2026-08-27T12:00:17Z"},
+        )
+        self.assertEqual(result["lock_at"], "2026-08-27T12:00:17Z")
+        self.assertTrue(result["verified"])
+
+    def test_announcement_window_refuses_non_announcement(self):
+        args = {
+            "course_id": 123,
+            "announcement_id": 9,
+            "confirmation": "APPROVE CANVAS ANNOUNCEMENT WINDOW WRITE course 123",
+        }
+        topic = {
+            "id": 9,
+            "is_announcement": False,
+            "posted_at": "2026-08-24T12:00:17Z",
+        }
+        with (
+            mock.patch.object(server, "require_write_approval"),
+            mock.patch.object(server, "api_get", return_value=topic),
+            mock.patch.object(server, "request_api") as request_api,
+        ):
+            with self.assertRaises(ValueError):
+                server.call_tool("canvas_set_announcement_three_day_window", args)
+        request_api.assert_not_called()
+
+    def test_announcement_window_requires_verified_three_day_value(self):
+        args = {
+            "course_id": 123,
+            "announcement_id": 9,
+            "confirmation": "APPROVE CANVAS ANNOUNCEMENT WINDOW WRITE course 123",
+        }
+        before = {
+            "id": 9,
+            "is_announcement": True,
+            "posted_at": "2026-08-24T12:00:17Z",
+            "lock_at": None,
+        }
+        wrong = {**before, "lock_at": "2026-08-25T12:00:17Z"}
+        with (
+            mock.patch.object(server, "require_write_approval"),
+            mock.patch.object(server, "api_get", side_effect=[before, wrong]),
+            mock.patch.object(server, "request_api", return_value=wrong),
+        ):
+            with self.assertRaises(RuntimeError):
+                server.call_tool("canvas_set_announcement_three_day_window", args)
+
+    def test_assignment_update_requires_exact_target_confirmation(self):
+        policy = {"version": 1, "enabled": True, "approved_course_ids": [123]}
+        with mock.patch.object(server, "write_policy", return_value=policy):
+            with self.assertRaises(PermissionError):
+                server.require_assignment_update_approval(123, 456, "yes")
+            server.require_assignment_update_approval(
+                123,
+                456,
+                "APPROVE CANVAS ASSIGNMENT UPDATE course 123 assignment 456",
+            )
+
+    def test_assignment_update_changes_only_description_and_verifies_settings(self):
+        args = {
+            "course_id": 123,
+            "assignment_id": 456,
+            "expected_name": "Sample Assignment",
+            "description": "<p>Revised body</p>",
+            "confirmation": "APPROVE CANVAS ASSIGNMENT UPDATE course 123 assignment 456",
+        }
+        before = {
+            "id": 456,
+            "name": "Sample Assignment",
+            "description": "<p>Old body</p>",
+            "points_possible": 0.0,
+            "submission_types": ["none"],
+            "published": True,
+            "workflow_state": "published",
+            "due_at": None,
+            "lock_at": None,
+            "unlock_at": None,
+            "assignment_group_id": 7,
+        }
+        after = {**before, "description": args["description"]}
+        with (
+            mock.patch.object(server, "require_assignment_update_approval") as approval,
+            mock.patch.object(server, "api_get", side_effect=[before, after]) as api_get,
+            mock.patch.object(server, "request_api", return_value=after) as request_api,
+        ):
+            result = server.call_tool("canvas_update_assignment", args)
+        approval.assert_called_once_with(123, 456, args["confirmation"])
+        self.assertEqual(api_get.call_count, 2)
+        request_api.assert_called_once_with(
+            "PUT",
+            "/api/v1/courses/123/assignments/456",
+            data={"assignment": {"description": "<p>Revised body</p>"}},
+        )
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["preserved_settings"]["submission_types"], ["none"])
+
+    def test_assignment_update_refuses_name_mismatch_before_write(self):
+        args = {
+            "course_id": 123,
+            "assignment_id": 456,
+            "expected_name": "Expected Assignment",
+            "description": "<p>Revised body</p>",
+            "confirmation": "APPROVE CANVAS ASSIGNMENT UPDATE course 123 assignment 456",
+        }
+        with (
+            mock.patch.object(server, "require_assignment_update_approval"),
+            mock.patch.object(
+                server,
+                "api_get",
+                return_value={"id": 456, "name": "Different Assignment"},
+            ),
+            mock.patch.object(server, "request_api") as request_api,
+        ):
+            with self.assertRaises(ValueError):
+                server.call_tool("canvas_update_assignment", args)
+        request_api.assert_not_called()
+
+    def test_assignment_update_refuses_protected_setting_change(self):
+        args = {
+            "course_id": 123,
+            "assignment_id": 456,
+            "expected_name": "Sample Assignment",
+            "description": "<p>Revised body</p>",
+            "confirmation": "APPROVE CANVAS ASSIGNMENT UPDATE course 123 assignment 456",
+        }
+        before = {
+            "id": 456,
+            "name": "Sample Assignment",
+            "description": "<p>Old body</p>",
+            "points_possible": 0.0,
+            "submission_types": ["none"],
+            "published": True,
+        }
+        after = {
+            **before,
+            "description": args["description"],
+            "published": False,
+        }
+        with (
+            mock.patch.object(server, "require_assignment_update_approval"),
+            mock.patch.object(server, "api_get", side_effect=[before, after]),
+            mock.patch.object(server, "request_api", return_value=after),
+        ):
+            with self.assertRaises(RuntimeError):
+                server.call_tool("canvas_update_assignment", args)
 
     def test_assignment_url_variants_are_resolved(self):
         variants = [
