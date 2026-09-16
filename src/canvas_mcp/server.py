@@ -811,6 +811,14 @@ def content_write(course_id: int, confirmation: Any, action: str, method: str, p
     return request_api(method, path, data=data)
 
 
+def normalize_canvas_assignment_description(value: str) -> str:
+    """Remove only link attributes Canvas predictably strips or injects."""
+    normalized = re.sub(r'\s+rel="noopener"', "", value)
+    normalized = re.sub(r'\s+data-api-endpoint="[^"]*"', "", normalized)
+    normalized = re.sub(r'\s+data-api-returntype="[^"]*"', "", normalized)
+    return normalized.strip()
+
+
 def set_announcement_three_day_window(args: dict[str, Any]) -> dict[str, Any]:
     course_id = require_course_id(args.get("course_id"))
     announcement_id = require_positive_id(args.get("announcement_id"), "announcement_id")
@@ -889,7 +897,11 @@ def update_assignment_description(args: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("Canvas returned an unexpected assignment during verification.")
     if after.get("name") != expected_name:
         raise RuntimeError("Canvas changed the assignment name unexpectedly.")
-    if after.get("description") != description:
+    saved_description = after.get("description")
+    if not isinstance(saved_description, str) or (
+        normalize_canvas_assignment_description(saved_description)
+        != normalize_canvas_assignment_description(description)
+    ):
         raise RuntimeError("Canvas did not save the expected assignment description.")
 
     changed_fields = {

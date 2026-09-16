@@ -476,6 +476,42 @@ class ServerSafetyTests(unittest.TestCase):
                 server.call_tool("canvas_update_assignment", args)
         request_api.assert_not_called()
 
+    def test_assignment_update_accepts_known_canvas_link_normalization(self):
+        args = {
+            "course_id": 123,
+            "assignment_id": 456,
+            "expected_name": "Sample Assignment",
+            "description": (
+                '<p><a href="https://canvas.example.edu/courses/123/pages/next" '
+                'target="_blank" rel="noopener">Next</a></p>'
+            ),
+            "confirmation": "APPROVE CANVAS ASSIGNMENT UPDATE course 123 assignment 456",
+        }
+        before = {
+            "id": 456,
+            "name": "Sample Assignment",
+            "description": "<p>Old body</p>",
+            "points_possible": 0.0,
+            "submission_types": ["none"],
+            "published": True,
+        }
+        after = {
+            **before,
+            "description": (
+                '<p><a href="https://canvas.example.edu/courses/123/pages/next" '
+                'target="_blank" '
+                'data-api-endpoint="https://canvas.example.edu/api/v1/courses/123/pages/next" '
+                'data-api-returntype="Page">Next</a></p>'
+            ),
+        }
+        with (
+            mock.patch.object(server, "require_assignment_update_approval"),
+            mock.patch.object(server, "api_get", side_effect=[before, after]),
+            mock.patch.object(server, "request_api", return_value=after),
+        ):
+            result = server.call_tool("canvas_update_assignment", args)
+        self.assertTrue(result["verified"])
+
     def test_assignment_update_refuses_protected_setting_change(self):
         args = {
             "course_id": 123,
