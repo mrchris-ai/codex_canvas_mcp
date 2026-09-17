@@ -310,7 +310,7 @@ class ServerSafetyTests(unittest.TestCase):
         tools = {tool["name"]: tool for tool in server.TOOLS}
         self.assertTrue(tools["canvas_read_api"]["annotations"]["readOnlyHint"])
         self.assertTrue(tools["canvas_inspect_rubric"]["annotations"]["readOnlyHint"])
-        for name in ("canvas_upload_image", "canvas_write_page", "canvas_create_module", "canvas_create_module_item", "canvas_create_assignment", "canvas_update_assignment", "canvas_create_assignment_rubric", "canvas_delete_rubric", "canvas_create_discussion", "canvas_set_announcement_three_day_window", "canvas_create_classic_quiz", "canvas_create_classic_quiz_question", "canvas_delete_page", "canvas_delete_assignment", "canvas_delete_discussion", "canvas_delete_classic_quiz", "canvas_delete_module"):
+        for name in ("canvas_upload_image", "canvas_write_page", "canvas_create_module", "canvas_create_module_item", "canvas_create_assignment", "canvas_update_assignment", "canvas_create_assignment_rubric", "canvas_delete_rubric", "canvas_create_discussion", "canvas_create_announcement", "canvas_set_announcement_three_day_window", "canvas_create_classic_quiz", "canvas_create_classic_quiz_question", "canvas_delete_page", "canvas_delete_assignment", "canvas_delete_discussion", "canvas_delete_classic_quiz", "canvas_delete_module"):
             self.assertFalse(tools[name]["annotations"]["readOnlyHint"])
             self.assertTrue(tools[name]["annotations"]["destructiveHint"])
 
@@ -330,6 +330,103 @@ class ServerSafetyTests(unittest.TestCase):
         with mock.patch.object(server, "content_write", return_value={"id": 4}) as content_write:
             server.call_tool("canvas_create_discussion", args)
         content_write.assert_called_once_with(123, args["confirmation"], "DISCUSSION", "POST", "/api/v1/courses/123/discussion_topics", {"title": "Discussion", "message": "<p>Prompt</p>", "discussion_type": "threaded", "published": False})
+
+    def test_scheduled_announcement_is_created_and_verified(self):
+        args = {
+            "course_id": 123,
+            "title": "Deadline reminder",
+            "message": "<p>Complete the course.</p>",
+            "delayed_post_at": "2026-09-23T05:00:00-07:00",
+            "lock_at": "2026-09-28T17:00:00-07:00",
+            "allow_participant_comments": True,
+            "confirmation": "APPROVE CANVAS ANNOUNCEMENT WRITE course 123",
+        }
+        created = {"id": 44}
+        verified = {
+            "id": 44,
+            "title": args["title"],
+            "message": args["message"],
+            "is_announcement": True,
+            "published": True,
+            "delayed_post_at": args["delayed_post_at"],
+            "lock_at": args["lock_at"],
+            "comments_disabled": False,
+            "html_url": "https://canvas.example/courses/123/discussion_topics/44",
+        }
+        with (
+            mock.patch.object(server, "require_write_approval") as require_write_approval,
+            mock.patch.object(server, "request_api", return_value=created) as request_api,
+            mock.patch.object(server, "api_get", return_value=verified) as api_get,
+        ):
+            result = server.call_tool("canvas_create_announcement", args)
+        require_write_approval.assert_called_once_with(
+            123,
+            args["confirmation"],
+            "ANNOUNCEMENT",
+        )
+        request_api.assert_called_once_with(
+            "POST",
+            "/api/v1/courses/123/discussion_topics",
+            data={
+                "title": args["title"],
+                "message": args["message"],
+                "discussion_type": "threaded",
+                "published": True,
+                "is_announcement": True,
+                "lock_comment": False,
+                "delayed_post_at": args["delayed_post_at"],
+                "lock_at": args["lock_at"],
+            },
+        )
+        api_get.assert_called_once_with(
+            "/api/v1/courses/123/discussion_topics/44"
+        )
+        self.assertEqual(result["announcement_id"], 44)
+        self.assertTrue(result["verified"])
+
+    def test_announcement_rejects_lock_before_post(self):
+        args = {
+            "course_id": 123,
+            "title": "Deadline reminder",
+            "message": "<p>Complete the course.</p>",
+            "delayed_post_at": "2026-09-23T05:00:00-07:00",
+            "lock_at": "2026-09-23T04:59:59-07:00",
+            "confirmation": "APPROVE CANVAS ANNOUNCEMENT WRITE course 123",
+        }
+        with (
+            mock.patch.object(server, "require_write_approval"),
+            mock.patch.object(server, "request_api") as request_api,
+        ):
+            with self.assertRaises(ValueError):
+                server.call_tool("canvas_create_announcement", args)
+        request_api.assert_not_called()
+
+    def test_announcement_requires_verified_schedule(self):
+        args = {
+            "course_id": 123,
+            "title": "Deadline reminder",
+            "message": "<p>Complete the course.</p>",
+            "delayed_post_at": "2026-09-23T05:00:00-07:00",
+            "lock_at": "2026-09-28T17:00:00-07:00",
+            "confirmation": "APPROVE CANVAS ANNOUNCEMENT WRITE course 123",
+        }
+        wrong = {
+            "id": 44,
+            "title": args["title"],
+            "message": args["message"],
+            "is_announcement": True,
+            "published": True,
+            "delayed_post_at": "2026-09-23T06:00:00-07:00",
+            "lock_at": args["lock_at"],
+            "comments_disabled": False,
+        }
+        with (
+            mock.patch.object(server, "require_write_approval"),
+            mock.patch.object(server, "request_api", return_value={"id": 44}),
+            mock.patch.object(server, "api_get", return_value=wrong),
+        ):
+            with self.assertRaises(RuntimeError):
+                server.call_tool("canvas_create_announcement", args)
 
     def test_announcement_window_uses_live_posted_at_and_verifies_saved_value(self):
         args = {

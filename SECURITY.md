@@ -10,7 +10,7 @@ This server runs locally with the permissions of its user. Canvas authorization 
 
 The local write policy is an additional application gate, not an authorization substitute. A policy file must be owned by the current user and have mode `0600`. The repository's example policy is intentionally disabled and must never contain real course IDs.
 
-The MCP client is a separate safety boundary. Keep confirmation enabled for every mutating content tool and review the complete target, payload, publication state, and course ID before approving it.
+The MCP client is a separate safety boundary. Keep confirmation enabled for every mutating content tool and review the complete target, payload, publication state, schedule and availability timestamps when applicable, and course ID before approving it.
 
 Image upload is not a general filesystem capability. `CANVAS_IMAGE_UPLOAD_ROOT` must name an absolute, current-user-owned, non-symlink directory. The server accepts only current-user-owned regular PNG, JPEG, and WebP files inside that root, verifies both extension and binary signature, rejects symlinks and files over 10 MiB, and derives the Canvas filename from the validated local basename. The image-upload confirmation is separate from other content writes.
 

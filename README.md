@@ -15,6 +15,8 @@ Every content tool is marked as mutating and destructive so compatible clients c
 
 Announcement-window maintenance is deliberately narrow. `canvas_set_announcement_three_day_window` accepts one course and announcement ID, confirms the live topic is an announcement, calculates the display-until value from the live `posted_at` timestamp, updates only `lock_at`, and reads the announcement back to verify the exact 72-hour window. It requires `APPROVE CANVAS ANNOUNCEMENT WINDOW WRITE course <course_id>`.
 
+Announcement authoring is a permanent first-class operation. `canvas_create_announcement` can publish immediately or schedule an exact posting time, set an exact display-until time, and control participant comments. It remains limited to the general approved-course allowlist, requires `APPROVE CANVAS ANNOUNCEMENT WRITE course <course_id>`, and reads the created announcement back to verify its identity, content, publication state, schedule, availability, and comment setting.
+
 Assignment maintenance is also narrowly scoped. `canvas_update_assignment` updates only the description of one existing assignment after verifying its exact ID and name. It reads the assignment back, confirms the description after Canvas's known link-attribute normalization, and refuses success if Canvas changes protected settings such as points, submission type, dates, group, or publication state. It requires `APPROVE CANVAS ASSIGNMENT UPDATE course <course_id> assignment <assignment_id>`.
 
 Rubric maintenance uses a separate operation-specific course allowlist and a stronger identity gate. `canvas_delete_rubric` requires `APPROVE CANVAS RUBRIC DELETE course <course_id> rubric <rubric_id>`, an exact expected title, course ownership, editable state, and an empty live `used_locations` result. Authorizing rubric deletion does not authorize any page, assignment, module, discussion, or quiz write. The tool returns the complete pre-deletion rubric definition and verifies that the rubric no longer appears in the active course list.
@@ -38,6 +40,7 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_update_assignment` | Update and verify one assignment description | Blocked |
 | `canvas_create_assignment_rubric` | Create and attach one assignment rubric from a Canvas URL | Blocked |
 | `canvas_create_discussion` | Create one discussion | Blocked |
+| `canvas_create_announcement` | Create and verify one immediate or scheduled announcement | Blocked |
 | `canvas_set_announcement_three_day_window` | Set one announcement to a verified 72-hour display window | Blocked |
 | `canvas_create_classic_quiz` | Create one Classic Quiz | Blocked |
 | `canvas_create_classic_quiz_question` | Add one question to a Classic Quiz | Blocked |
@@ -145,11 +148,12 @@ Canvas uses a documented three-step upload exchange: initialize the course file 
 
 ## Current authoring boundary
 
-This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its only local-file capability is the payload-gated image uploader described above. Generic file upload, New Quizzes, enrollments, cross-listing, provisioning, and account/course administration remain unsupported.
+This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its only local-file capability is the payload-gated image uploader described above. Generic file upload, New Quizzes, enrollments, cross-listing, provisioning, and account/course administration remain unsupported.
 
 See [`docs/2026-08-06-content-authoring-extension.md`](docs/2026-08-06-content-authoring-extension.md) for the implementation and end-to-end validation record.
 See [`docs/2026-08-16-image-upload-extension.md`](docs/2026-08-16-image-upload-extension.md) for the image-upload threat model and validation record.
 See [`docs/2026-08-24-support-maintenance-extension.md`](docs/2026-08-24-support-maintenance-extension.md) for the first support-maintenance tool contract and validation record.
+See [`docs/2026-09-17-announcement-authoring-extension.md`](docs/2026-09-17-announcement-authoring-extension.md) for the scheduled-announcement contract and validation record.
 
 ## Development
 

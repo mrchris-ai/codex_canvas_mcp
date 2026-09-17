@@ -26,7 +26,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.7.0"
+SERVER_VERSION = "0.8.0"
 PROTOCOL_VERSION = "2025-03-26"
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 IMAGE_CONTENT_TYPES = {
@@ -354,6 +354,13 @@ def require_iso8601_datetime(value: Any, name: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError(f"{name} must include a timezone.")
     return parsed
+
+
+def format_iso8601_datetime(value: datetime) -> str:
+    rendered = value.isoformat(timespec="seconds")
+    if rendered.endswith("+00:00"):
+        return rendered[:-6] + "Z"
+    return rendered
 
 
 def require_number(value: Any, name: str, *, minimum: float = 0) -> float:
@@ -819,6 +826,109 @@ def normalize_canvas_assignment_description(value: str) -> str:
     return normalized.strip()
 
 
+def create_announcement(args: dict[str, Any]) -> dict[str, Any]:
+    """Create one immediate or scheduled Canvas announcement and verify it live."""
+    course_id = require_course_id(args.get("course_id"))
+    confirmation = args.get("confirmation")
+    require_write_approval(course_id, confirmation, "ANNOUNCEMENT")
+
+    title = require_text(args.get("title"), "title")
+    message = args.get("message")
+    if not isinstance(message, str):
+        raise ValueError("message must be a string.")
+    discussion_type = args.get("discussion_type", "threaded")
+    if discussion_type not in {"threaded", "focused"}:
+        raise ValueError("discussion_type must be threaded or focused.")
+    published = args.get("published", True)
+    allow_participant_comments = args.get("allow_participant_comments", True)
+    require_boolean(published, "published")
+    require_boolean(allow_participant_comments, "allow_participant_comments")
+
+    delayed_post_at = None
+    delayed_post_at_text = None
+    if "delayed_post_at" in args:
+        delayed_post_at = require_iso8601_datetime(
+            args.get("delayed_post_at"), "delayed_post_at"
+        )
+        delayed_post_at_text = format_iso8601_datetime(delayed_post_at)
+
+    lock_at = None
+    lock_at_text = None
+    if "lock_at" in args:
+        lock_at = require_iso8601_datetime(args.get("lock_at"), "lock_at")
+        lock_at_text = format_iso8601_datetime(lock_at)
+
+    if delayed_post_at is not None and lock_at is not None and lock_at <= delayed_post_at:
+        raise ValueError("lock_at must be later than delayed_post_at.")
+
+    payload: dict[str, Any] = {
+        "title": title,
+        "message": message,
+        "discussion_type": discussion_type,
+        "published": published,
+        "is_announcement": True,
+        "lock_comment": not allow_participant_comments,
+    }
+    if delayed_post_at_text is not None:
+        payload["delayed_post_at"] = delayed_post_at_text
+    if lock_at_text is not None:
+        payload["lock_at"] = lock_at_text
+
+    collection_path = f"/api/v1/courses/{course_id}/discussion_topics"
+    created = request_api("POST", collection_path, data=payload)
+    if not isinstance(created, dict):
+        raise RuntimeError("Canvas returned an unexpected announcement creation response.")
+    announcement_id = require_positive_id(created.get("id"), "announcement_id")
+    item_path = f"{collection_path}/{announcement_id}"
+    verified = api_get(item_path)
+    if not isinstance(verified, dict) or verified.get("id") != announcement_id:
+        raise RuntimeError(
+            f"Canvas returned an unexpected record while verifying announcement {announcement_id}."
+        )
+
+    failures: list[str] = []
+    if verified.get("is_announcement") is not True:
+        failures.append("is_announcement")
+    if verified.get("title") != title:
+        failures.append("title")
+    if verified.get("message") != message:
+        failures.append("message")
+    if verified.get("published") is not published:
+        failures.append("published")
+    if delayed_post_at is not None:
+        saved_delayed_post_at = require_iso8601_datetime(
+            verified.get("delayed_post_at"), "delayed_post_at"
+        )
+        if saved_delayed_post_at != delayed_post_at:
+            failures.append("delayed_post_at")
+    if lock_at is not None:
+        saved_lock_at = require_iso8601_datetime(verified.get("lock_at"), "lock_at")
+        if saved_lock_at != lock_at:
+            failures.append("lock_at")
+    expected_comments_disabled = not allow_participant_comments
+    if verified.get("comments_disabled") is not expected_comments_disabled:
+        failures.append("comments_disabled")
+    if failures:
+        raise RuntimeError(
+            f"Canvas announcement {announcement_id} failed verification for: "
+            + ", ".join(failures)
+            + "."
+        )
+
+    return {
+        "created": True,
+        "verified": True,
+        "course_id": course_id,
+        "announcement_id": announcement_id,
+        "title": verified.get("title"),
+        "html_url": verified.get("html_url"),
+        "published": verified.get("published"),
+        "delayed_post_at": verified.get("delayed_post_at"),
+        "lock_at": verified.get("lock_at"),
+        "comments_disabled": verified.get("comments_disabled"),
+    }
+
+
 def set_announcement_three_day_window(args: dict[str, Any]) -> dict[str, Any]:
     course_id = require_course_id(args.get("course_id"))
     announcement_id = require_positive_id(args.get("announcement_id"), "announcement_id")
@@ -832,9 +942,7 @@ def set_announcement_three_day_window(args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("The requested discussion topic is not an announcement.")
     posted_at = require_iso8601_datetime(announcement.get("posted_at"), "posted_at")
     display_until = posted_at + timedelta(days=3)
-    display_until_text = display_until.isoformat(timespec="seconds")
-    if display_until_text.endswith("+00:00"):
-        display_until_text = display_until_text[:-6] + "Z"
+    display_until_text = format_iso8601_datetime(display_until)
     request_api("PUT", path, data={"lock_at": display_until_text})
     verified = api_get(path)
     if not isinstance(verified, dict) or verified.get("id") != announcement_id:
@@ -1165,6 +1273,40 @@ TOOLS: list[dict[str, Any]] = [
         "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
     },
     {
+        "name": "canvas_create_announcement",
+        "description": (
+            "Create exactly one immediate or scheduled Canvas announcement in an approved course. "
+            "Supports an exact posting time, an exact display-until time, and participant-comment "
+            "control, then reads the saved announcement back and verifies every requested field. "
+            "Disabled by default and requires explicit confirmation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "course_id": {"type": "integer", "minimum": 1},
+                "title": {"type": "string", "minLength": 1, "maxLength": 255},
+                "message": {"type": "string"},
+                "discussion_type": {
+                    "type": "string",
+                    "enum": ["threaded", "focused"],
+                    "default": "threaded",
+                },
+                "published": {"type": "boolean", "default": True},
+                "delayed_post_at": {"type": "string", "format": "date-time"},
+                "lock_at": {"type": "string", "format": "date-time"},
+                "allow_participant_comments": {"type": "boolean", "default": True},
+                "confirmation": {"type": "string"},
+            },
+            "required": ["course_id", "title", "message", "confirmation"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+        },
+    },
+    {
         "name": "canvas_set_announcement_three_day_window",
         "description": (
             "Set one existing Canvas announcement's display-until value to exactly 72 hours "
@@ -1338,6 +1480,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
             raise ValueError("message must be a string.")
         require_boolean(discussion["published"], "published")
         return content_write(course_id, args.get("confirmation"), "DISCUSSION", "POST", f"/api/v1/courses/{course_id}/discussion_topics", discussion)
+    if name == "canvas_create_announcement":
+        return create_announcement(args)
     if name == "canvas_set_announcement_three_day_window":
         return set_announcement_three_day_window(args)
     if name == "canvas_create_classic_quiz":
