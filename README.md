@@ -112,6 +112,45 @@ Prerequisites: Python 3.11 or newer, the [1Password CLI](https://developer.1pass
 
    Put this in the trusted project's `.codex/config.toml` or your personal Codex configuration. Do not add secret values. Restart or open a new task after changing MCP configuration, then verify the listed tools before requesting Canvas data.
 
+### Remote Codex sessions on macOS
+
+A Codex app server launched through SSH may not share the logged-in GUI session's unlocked login Keychain. If `security` reports that user interaction is not allowed, keep credential access in a GUI LaunchAgent and connect remote Codex to it through a private Unix socket:
+
+1. Create a dedicated runtime outside the development checkout and install a non-editable copy of the package:
+
+   ```bash
+   mkdir -p "/Users/YOU/Library/Application Support/codex-canvas-mcp/runtime"
+   python3 -m venv "/Users/YOU/Library/Application Support/codex-canvas-mcp/runtime/venv"
+   "/Users/YOU/Library/Application Support/codex-canvas-mcp/runtime/venv/bin/python" \
+     -m pip install /absolute/path/to/codex_canvas_mcp
+   ```
+
+2. Copy `examples/com.example.codex-canvas-mcp.plist` into `~/Library/LaunchAgents/`, replace every placeholder, and keep write-policy variables absent.
+3. Create the socket directory with mode `0700`, make the plist `0600`, then load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.codex-canvas-mcp.plist`.
+4. Register only the dedicated runtime's socket client with Codex:
+
+   ```bash
+   codex mcp add canvas \
+     --env "CANVAS_MCP_SOCKET=/Users/YOU/Library/Application Support/codex-canvas-mcp/canvas.sock" \
+     -- "/Users/YOU/Library/Application Support/codex-canvas-mcp/runtime/venv/bin/python" \
+     -m canvas_mcp.socket_bridge client
+   ```
+
+Reinstall the package into the dedicated runtime and reload the LaunchAgent whenever the checked-out code changes. The daemon creates a socket owned by the current user with mode `0600`. Its parent directory must be owned by that user with no group or other permissions. The remote client receives only MCP protocol traffic; Keychain and 1Password credentials remain in the GUI-hosted server process. The bridge removes raw service-token and write-policy variables before starting the MCP child, so this remote deployment is deliberately read-only. Enabling Canvas writes requires a separate reviewed deployment instead of adding a write policy to this bridge.
+
+For long 1Password service-account tokens, use the included helper from an interactive Mac terminal instead of passing the token on a command line. It validates access to the intended vault item before updating the existing Keychain item, preserves the item's access-control list, and verifies the exact stored value:
+
+```bash
+/usr/bin/xcrun swift scripts/store_service_token_macos.swift \
+  --service "your-keychain-service" \
+  --account "your-keychain-account" \
+  --vault "your-vault" \
+  --item "your-canvas-token-item" \
+  --op-path "/opt/homebrew/bin/op"
+```
+
+The target Keychain item must already exist with its reviewed access controls. The helper refuses noninteractive input and never accepts a token as an argument.
+
 ## ChatGPT compatibility
 
 This repository implements a local stdio MCP server for Codex and other clients that support local stdio MCP. Current ChatGPT custom apps do not connect directly to a local stdio server. OpenAI's current guidance is to expose a private local MCP through Secure MCP Tunnel (or deploy a reviewed remote MCP endpoint), subject to plan and workspace-admin availability. Do not expose this process directly to the public internet.
