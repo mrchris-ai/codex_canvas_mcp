@@ -310,7 +310,7 @@ class ServerSafetyTests(unittest.TestCase):
         tools = {tool["name"]: tool for tool in server.TOOLS}
         self.assertTrue(tools["canvas_read_api"]["annotations"]["readOnlyHint"])
         self.assertTrue(tools["canvas_inspect_rubric"]["annotations"]["readOnlyHint"])
-        for name in ("canvas_upload_image", "canvas_write_page", "canvas_create_module", "canvas_create_module_item", "canvas_create_assignment", "canvas_update_assignment", "canvas_create_assignment_rubric", "canvas_delete_rubric", "canvas_create_discussion", "canvas_create_announcement", "canvas_update_announcement", "canvas_set_announcement_three_day_window", "canvas_create_classic_quiz", "canvas_create_classic_quiz_question", "canvas_delete_page", "canvas_delete_assignment", "canvas_delete_discussion", "canvas_delete_classic_quiz", "canvas_delete_module"):
+        for name in ("canvas_upload_image", "canvas_write_page", "canvas_create_module", "canvas_create_module_item", "canvas_create_assignment", "canvas_update_assignment", "canvas_create_assignment_rubric", "canvas_delete_rubric", "canvas_create_discussion", "canvas_create_announcement", "canvas_update_announcement", "canvas_set_announcement_sections", "canvas_set_announcement_three_day_window", "canvas_create_classic_quiz", "canvas_create_classic_quiz_question", "canvas_delete_page", "canvas_delete_assignment", "canvas_delete_discussion", "canvas_delete_classic_quiz", "canvas_delete_module"):
             self.assertFalse(tools[name]["annotations"]["readOnlyHint"])
             self.assertTrue(tools[name]["annotations"]["destructiveHint"])
 
@@ -609,6 +609,135 @@ class ServerSafetyTests(unittest.TestCase):
         ):
             with self.assertRaises(RuntimeError):
                 server.call_tool("canvas_update_announcement", args)
+
+    def test_announcement_section_update_requires_exact_target_confirmation(self):
+        policy = {"version": 1, "enabled": True, "approved_course_ids": [123]}
+        with mock.patch.object(server, "write_policy", return_value=policy):
+            with self.assertRaises(PermissionError):
+                server.require_announcement_section_approval(123, 9, "yes")
+            server.require_announcement_section_approval(
+                123,
+                9,
+                "APPROVE CANVAS ANNOUNCEMENT SECTION WRITE course 123 announcement 9",
+            )
+
+    def test_announcement_section_update_sets_exact_audience_and_preserves_content(self):
+        args = {
+            "course_id": 123,
+            "announcement_id": 9,
+            "expected_title": "Deadline reminder",
+            "section_ids": [21, 22],
+            "confirmation": (
+                "APPROVE CANVAS ANNOUNCEMENT SECTION WRITE course 123 announcement 9"
+            ),
+        }
+        before = {
+            "id": 9,
+            "title": "Deadline reminder",
+            "message": "<p>Complete the course.</p>",
+            "is_announcement": True,
+            "is_section_specific": False,
+            "published": True,
+            "discussion_type": "threaded",
+            "delayed_post_at": "2026-09-23T12:00:00Z",
+            "posted_at": "2026-09-17T17:48:34Z",
+            "lock_at": "2026-09-29T00:00:00Z",
+            "comments_disabled": False,
+            "group_category_id": None,
+            "pinned": False,
+        }
+        section_21 = {"id": 21, "name": "Section 1", "course_id": 123}
+        section_22 = {"id": 22, "name": "Section 2", "course_id": 123}
+        after = {
+            **before,
+            "is_section_specific": True,
+            "sections": [section_21, section_22],
+            "html_url": "https://canvas.example/courses/123/discussion_topics/9",
+        }
+        with (
+            mock.patch.object(server, "require_announcement_section_approval") as approval,
+            mock.patch.object(
+                server,
+                "api_get",
+                side_effect=[before, section_21, section_22, after],
+            ) as api_get,
+            mock.patch.object(server, "request_api", return_value=after) as request_api,
+        ):
+            result = server.call_tool("canvas_set_announcement_sections", args)
+        approval.assert_called_once_with(123, 9, args["confirmation"])
+        self.assertEqual(api_get.call_count, 4)
+        request_api.assert_called_once_with(
+            "PUT",
+            "/api/v1/courses/123/discussion_topics/9",
+            data={"specific_sections": "21,22"},
+        )
+        self.assertEqual(
+            result["sections"],
+            [{"id": 21, "name": "Section 1"}, {"id": 22, "name": "Section 2"}],
+        )
+        self.assertTrue(result["verified"])
+
+    def test_announcement_section_update_refuses_foreign_section_before_write(self):
+        args = {
+            "course_id": 123,
+            "announcement_id": 9,
+            "expected_title": "Deadline reminder",
+            "section_ids": [21],
+            "confirmation": (
+                "APPROVE CANVAS ANNOUNCEMENT SECTION WRITE course 123 announcement 9"
+            ),
+        }
+        before = {
+            "id": 9,
+            "title": "Deadline reminder",
+            "message": "<p>Complete the course.</p>",
+            "is_announcement": True,
+        }
+        foreign_section = {"id": 21, "name": "Other course", "course_id": 999}
+        with (
+            mock.patch.object(server, "require_announcement_section_approval"),
+            mock.patch.object(server, "api_get", side_effect=[before, foreign_section]),
+            mock.patch.object(server, "request_api") as request_api,
+        ):
+            with self.assertRaises(ValueError):
+                server.call_tool("canvas_set_announcement_sections", args)
+        request_api.assert_not_called()
+
+    def test_announcement_section_update_requires_exact_readback(self):
+        args = {
+            "course_id": 123,
+            "announcement_id": 9,
+            "expected_title": "Deadline reminder",
+            "section_ids": [21, 22],
+            "confirmation": (
+                "APPROVE CANVAS ANNOUNCEMENT SECTION WRITE course 123 announcement 9"
+            ),
+        }
+        before = {
+            "id": 9,
+            "title": "Deadline reminder",
+            "message": "<p>Complete the course.</p>",
+            "is_announcement": True,
+            "published": True,
+        }
+        section_21 = {"id": 21, "name": "Section 1", "course_id": 123}
+        section_22 = {"id": 22, "name": "Section 2", "course_id": 123}
+        wrong = {
+            **before,
+            "is_section_specific": True,
+            "sections": [section_21],
+        }
+        with (
+            mock.patch.object(server, "require_announcement_section_approval"),
+            mock.patch.object(
+                server,
+                "api_get",
+                side_effect=[before, section_21, section_22, wrong],
+            ),
+            mock.patch.object(server, "request_api", return_value=wrong),
+        ):
+            with self.assertRaises(RuntimeError):
+                server.call_tool("canvas_set_announcement_sections", args)
 
     def test_assignment_update_requires_exact_target_confirmation(self):
         policy = {"version": 1, "enabled": True, "approved_course_ids": [123]}

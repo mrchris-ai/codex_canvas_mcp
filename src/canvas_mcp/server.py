@@ -26,7 +26,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.9.0"
+SERVER_VERSION = "0.10.0"
 PROTOCOL_VERSION = "2025-03-26"
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 IMAGE_CONTENT_TYPES = {
@@ -294,6 +294,24 @@ def require_announcement_update_approval(
         )
     expected = (
         f"APPROVE CANVAS ANNOUNCEMENT UPDATE course {course_id} "
+        f"announcement {announcement_id}"
+    )
+    if confirmation != expected:
+        raise PermissionError(f"Confirmation must exactly match: {expected}")
+
+
+def require_announcement_section_approval(
+    course_id: int,
+    announcement_id: int,
+    confirmation: Any,
+) -> None:
+    policy = write_policy()
+    if not policy["enabled"] or course_id not in policy["approved_course_ids"]:
+        raise PermissionError(
+            "Canvas writing is disabled or this course is not approved by the local policy."
+        )
+    expected = (
+        f"APPROVE CANVAS ANNOUNCEMENT SECTION WRITE course {course_id} "
         f"announcement {announcement_id}"
     )
     if confirmation != expected:
@@ -1051,6 +1069,104 @@ def update_announcement_message(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def set_announcement_sections(args: dict[str, Any]) -> dict[str, Any]:
+    """Set the exact section audience for one Canvas announcement and verify it live."""
+    course_id = require_course_id(args.get("course_id"))
+    announcement_id = require_positive_id(args.get("announcement_id"), "announcement_id")
+    expected_title = require_text(args.get("expected_title"), "expected_title")
+    raw_section_ids = args.get("section_ids")
+    if not isinstance(raw_section_ids, list) or not raw_section_ids:
+        raise ValueError("section_ids must be a non-empty list of positive integers.")
+    section_ids = [
+        require_positive_id(section_id, "section_id") for section_id in raw_section_ids
+    ]
+    if len(section_ids) != len(set(section_ids)):
+        raise ValueError("section_ids must not contain duplicates.")
+    require_announcement_section_approval(
+        course_id,
+        announcement_id,
+        args.get("confirmation"),
+    )
+
+    path = f"/api/v1/courses/{course_id}/discussion_topics/{announcement_id}"
+    sections_query = {"include[]": "sections"}
+    before = api_get(path, sections_query)
+    if not isinstance(before, dict) or before.get("id") != announcement_id:
+        raise RuntimeError("Canvas returned an unexpected announcement record.")
+    if before.get("is_announcement") is not True:
+        raise ValueError("The requested discussion topic is not an announcement.")
+    if before.get("title") != expected_title:
+        raise ValueError(
+            f"Announcement title mismatch: expected {expected_title!r}, "
+            f"Canvas returned {before.get('title')!r}."
+        )
+
+    selected_sections: list[dict[str, Any]] = []
+    for section_id in section_ids:
+        section = api_get(f"/api/v1/sections/{section_id}")
+        if not isinstance(section, dict) or section.get("id") != section_id:
+            raise RuntimeError(f"Canvas returned an unexpected section record for {section_id}.")
+        if section.get("course_id") != course_id:
+            raise ValueError(
+                f"Section {section_id} does not belong to course {course_id}."
+            )
+        selected_sections.append({"id": section_id, "name": section.get("name")})
+
+    preserved_fields = (
+        "title",
+        "message",
+        "is_announcement",
+        "published",
+        "discussion_type",
+        "delayed_post_at",
+        "posted_at",
+        "lock_at",
+        "comments_disabled",
+        "group_category_id",
+        "pinned",
+    )
+    preserved_before = {
+        field: before[field] for field in preserved_fields if field in before
+    }
+
+    specific_sections = ",".join(str(section_id) for section_id in section_ids)
+    request_api("PUT", path, data={"specific_sections": specific_sections})
+    after = api_get(path, sections_query)
+    if not isinstance(after, dict) or after.get("id") != announcement_id:
+        raise RuntimeError("Canvas returned an unexpected announcement during verification.")
+    if after.get("is_section_specific") is not True:
+        raise RuntimeError("Canvas did not make the announcement section-specific.")
+    saved_sections = after.get("sections")
+    if not isinstance(saved_sections, list):
+        raise RuntimeError("Canvas did not return the announcement's section audience.")
+    saved_section_ids = {
+        section.get("id") for section in saved_sections if isinstance(section, dict)
+    }
+    if saved_section_ids != set(section_ids) or len(saved_sections) != len(section_ids):
+        raise RuntimeError("Canvas did not save the exact requested section audience.")
+
+    changed_fields = {
+        field: {"before": preserved_before[field], "after": after.get(field)}
+        for field in preserved_before
+        if after.get(field) != preserved_before[field]
+    }
+    if changed_fields:
+        changed_names = ", ".join(sorted(changed_fields))
+        raise RuntimeError(
+            "Canvas changed protected announcement settings unexpectedly: " + changed_names
+        )
+
+    return {
+        "course_id": course_id,
+        "announcement_id": announcement_id,
+        "title": expected_title,
+        "html_url": after.get("html_url"),
+        "sections": selected_sections,
+        "preserved_settings": preserved_before,
+        "verified": True,
+    }
+
+
 def update_assignment_description(args: dict[str, Any]) -> dict[str, Any]:
     course_id = require_course_id(args.get("course_id"))
     assignment_id = require_positive_id(args.get("assignment_id"), "assignment_id")
@@ -1452,6 +1568,44 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "canvas_set_announcement_sections",
+        "description": (
+            "Set the exact section audience for one existing Canvas announcement after verifying "
+            "its exact ID, title, announcement type, and every requested section's course "
+            "membership. Reads the announcement back with its sections and verifies that content, "
+            "schedule, publication state, and other protected settings did not change. Disabled "
+            "by default and requires target-specific confirmation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "course_id": {"type": "integer", "minimum": 1},
+                "announcement_id": {"type": "integer", "minimum": 1},
+                "expected_title": {"type": "string", "minLength": 1, "maxLength": 255},
+                "section_ids": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 1},
+                    "minItems": 1,
+                    "uniqueItems": True,
+                },
+                "confirmation": {"type": "string"},
+            },
+            "required": [
+                "course_id",
+                "announcement_id",
+                "expected_title",
+                "section_ids",
+                "confirmation",
+            ],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+        },
+    },
+    {
         "name": "canvas_create_classic_quiz",
         "description": "Create exactly one Canvas Classic Quiz in an approved course. New Quizzes are not supported by this tool. Disabled by default and requires explicit confirmation.",
         "inputSchema": {"type": "object", "properties": {"course_id": {"type": "integer", "minimum": 1}, "title": {"type": "string", "minLength": 1, "maxLength": 255}, "description": {"type": "string"}, "quiz_type": {"type": "string", "enum": ["practice_quiz", "assignment", "graded_survey", "survey"], "default": "practice_quiz"}, "published": {"type": "boolean", "default": False}, "confirmation": {"type": "string"}}, "required": ["course_id", "title", "confirmation"], "additionalProperties": False},
@@ -1608,6 +1762,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return set_announcement_three_day_window(args)
     if name == "canvas_update_announcement":
         return update_announcement_message(args)
+    if name == "canvas_set_announcement_sections":
+        return set_announcement_sections(args)
     if name == "canvas_create_classic_quiz":
         course_id = require_course_id(args.get("course_id"))
         quiz_type = args.get("quiz_type", "practice_quiz")

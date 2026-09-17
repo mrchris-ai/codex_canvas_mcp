@@ -21,6 +21,12 @@ This is a resource-specific content-authoring operation. It does not add a gener
 
 Before writing, the tool reads the live record and verifies its ID, title, and announcement type. After writing, it reads the record again, verifies the requested body, and confirms that protected settings did not change. Protected settings include the title, announcement type, publication state, discussion type, posting and display-until timestamps, comment setting, section scope, group category, and pin state.
 
+## Exact section audience
+
+`canvas_set_announcement_sections` changes only the section audience of one existing announcement. It requires the exact course ID, announcement ID, expected title, a non-empty unique list of section IDs, and confirmation `APPROVE CANVAS ANNOUNCEMENT SECTION WRITE course <course_id> announcement <announcement_id>`.
+
+Before writing, the tool verifies the announcement identity and type, then resolves every requested section and confirms that it belongs to the approved course. It sends the requested IDs through Canvas's documented comma-separated `specific_sections` parameter. The post-write read includes Canvas section associations and must match the requested ID set exactly. The body, title, publication state, discussion type, posting and display-until timestamps, comment setting, group category, and pin state are protected from change.
+
 ## Validation
 
-The unit suite covers the exact create and update payloads and endpoints, allowlist and target-specific confirmation paths, timestamp ordering, identity preflight, protected-setting checks, read-back verification, and mutating tool annotations. The package is also compiled after the tests.
+The unit suite covers the exact create, body-update, and section-update payloads and endpoints; allowlist and target-specific confirmation paths; timestamp ordering; announcement and section identity preflight; exact section read-back; protected-setting checks; and mutating tool annotations. The package is also compiled after the tests.
