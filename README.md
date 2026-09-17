@@ -17,6 +17,8 @@ Announcement-window maintenance is deliberately narrow. `canvas_set_announcement
 
 Announcement authoring is a permanent first-class operation. `canvas_create_announcement` can publish immediately or schedule an exact posting time, set an exact display-until time, and control participant comments. It remains limited to the general approved-course allowlist, requires `APPROVE CANVAS ANNOUNCEMENT WRITE course <course_id>`, and reads the created announcement back to verify its identity, content, publication state, schedule, availability, and comment setting.
 
+Announcement maintenance is equally narrow. `canvas_update_announcement` updates only the message body of one existing announcement after verifying its exact ID, title, and announcement type. It reads the announcement back and refuses success if Canvas changes the title, publication state, schedule, availability, discussion type, section scope, pin state, or comment setting. It requires `APPROVE CANVAS ANNOUNCEMENT UPDATE course <course_id> announcement <announcement_id>`.
+
 Assignment maintenance is also narrowly scoped. `canvas_update_assignment` updates only the description of one existing assignment after verifying its exact ID and name. It reads the assignment back, confirms the description after Canvas's known link-attribute normalization, and refuses success if Canvas changes protected settings such as points, submission type, dates, group, or publication state. It requires `APPROVE CANVAS ASSIGNMENT UPDATE course <course_id> assignment <assignment_id>`.
 
 Rubric maintenance uses a separate operation-specific course allowlist and a stronger identity gate. `canvas_delete_rubric` requires `APPROVE CANVAS RUBRIC DELETE course <course_id> rubric <rubric_id>`, an exact expected title, course ownership, editable state, and an empty live `used_locations` result. Authorizing rubric deletion does not authorize any page, assignment, module, discussion, or quiz write. The tool returns the complete pre-deletion rubric definition and verifies that the rubric no longer appears in the active course list.
@@ -41,6 +43,7 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_create_assignment_rubric` | Create and attach one assignment rubric from a Canvas URL | Blocked |
 | `canvas_create_discussion` | Create one discussion | Blocked |
 | `canvas_create_announcement` | Create and verify one immediate or scheduled announcement | Blocked |
+| `canvas_update_announcement` | Update and verify one exact announcement body | Blocked |
 | `canvas_set_announcement_three_day_window` | Set one announcement to a verified 72-hour display window | Blocked |
 | `canvas_create_classic_quiz` | Create one Classic Quiz | Blocked |
 | `canvas_create_classic_quiz_question` | Add one question to a Classic Quiz | Blocked |
