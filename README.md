@@ -140,11 +140,21 @@ Keep writing off unless a specific task requires it.
    ```
 
 4. Add `CANVAS_WRITE_POLICY=/absolute/private/path/write-policy.json` to the MCP server environment.
-5. Restart the client and call `canvas_get_write_policy` to verify the effective policy.
+5. Restart the client if the environment variable was added or changed, then call `canvas_get_write_policy` to verify the effective policy. Edits to an already configured policy file are read on each guarded operation and do not require a restart.
 6. For each content write, review the exact target and payload. Supply the action-specific confirmation phrase and approve the mutating action in the client.
 7. Disable the policy again when the task is complete.
 
 If the variable is absent, the file is missing, permissions are broader than `0600`, writing is disabled, or the course is not allowlisted, the server refuses the write.
+
+### Authoring in a Blueprint course
+
+A Blueprint course uses the same exact-course content allowlist as any other course. Approving an associated course does not approve its Blueprint, and approving a Blueprint does not approve its associated courses. Keep real course IDs in the private policy file, never in the repository or example configuration.
+
+Before editing, use `canvas_read_api` to verify the target course's `blueprint` flag and, when needed, its associated courses at `/api/v1/courses/<course_id>/blueprint_templates/default/associated_courses`. Add the explicitly authorized Blueprint ID to the existing private `approved_course_ids` list, preserving the other entries and file mode `0600`. Verify the effective list with `canvas_get_write_policy`.
+
+Preserve the original content, use the resource-specific write tool and exact confirmation phrase, and read the saved resource back through the MCP. Publishing or updating a page in the Blueprint is separate from syncing it to associated courses. This connector does not provide Blueprint synchronization.
+
+The course syllabus is not a Canvas Page. It can be inspected with `canvas_read_api` at `/api/v1/courses/<course_id>` using `include[]=syllabus_body`, but no syllabus-writing tool is currently available. Report that limitation before proposing another editing route; do not substitute `canvas_write_page` for a syllabus update.
 
 ### Enabling image upload
 
