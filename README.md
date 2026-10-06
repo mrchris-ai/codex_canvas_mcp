@@ -38,6 +38,7 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_get_write_policy` | Inspect local policy state | Available |
 | `canvas_upload_image` | Upload one verified image from the configured trusted folder | Blocked |
 | `canvas_write_page` | Create or update one page | Blocked |
+| `canvas_update_syllabus` | Preview, replace, and verify only a course syllabus body | Blocked |
 | `canvas_create_module` | Create one module | Blocked |
 | `canvas_create_module_item` | Place one content item in a module | Blocked |
 | `canvas_create_assignment` | Create one assignment | Blocked |
@@ -140,11 +141,25 @@ Keep writing off unless a specific task requires it.
    ```
 
 4. Add `CANVAS_WRITE_POLICY=/absolute/private/path/write-policy.json` to the MCP server environment.
-5. Restart the client and call `canvas_get_write_policy` to verify the effective policy.
+5. Restart the client if the environment variable was added or changed, then call `canvas_get_write_policy` to verify the effective policy. Edits to an already configured policy file are read on each guarded operation and do not require a restart.
 6. For each content write, review the exact target and payload. Supply the action-specific confirmation phrase and approve the mutating action in the client.
 7. Disable the policy again when the task is complete.
 
 If the variable is absent, the file is missing, permissions are broader than `0600`, writing is disabled, or the course is not allowlisted, the server refuses the write.
+
+### Authoring in a Blueprint course
+
+A Blueprint course uses the same exact-course content allowlist as any other course. Approving an associated course does not approve its Blueprint, and approving a Blueprint does not approve its associated courses. Keep real course IDs in the private policy file, never in the repository or example configuration.
+
+Before editing, use `canvas_read_api` to verify the target course's `blueprint` flag and, when needed, its associated courses at `/api/v1/courses/<course_id>/blueprint_templates/default/associated_courses`. Add the explicitly authorized Blueprint ID to the existing private `approved_course_ids` list, preserving the other entries and file mode `0600`. Verify the effective list with `canvas_get_write_policy`.
+
+Preserve the original content, use the resource-specific write tool and exact confirmation phrase, and read the saved resource back through the MCP. Publishing or updating a page in the Blueprint is separate from syncing it to associated courses. This connector does not provide Blueprint synchronization.
+
+The course syllabus is not a Canvas Page. Inspect it with `canvas_read_api` at `/api/v1/courses/<course_id>` using `include[]=syllabus_body`, then use `canvas_update_syllabus` for body-only changes. The endpoint is documented in the [Canvas Courses API](https://developerdocs.instructure.com/services/canvas/resources/courses#method.courses.update).
+
+The syllabus tool requires the exact course allowlist, `APPROVE CANVAS SYLLABUS WRITE course <course_id>`, client approval, and `expected_sha256` calculated from the reviewed current UTF-8 syllabus body. It defaults to `dry_run: true`, returning the original body for recovery. Save that recovery content before explicitly setting `dry_run: false`. The only outgoing field is `course[syllabus_body]`; extra arguments and empty bodies are rejected. It reads the course back and verifies exact body equality and protected course settings. If Canvas normalizes the HTML or a setting differs, the tool reports a verification failure after the write; inspect live state before retrying. The hash check detects changes before the PUT but is not an atomic Canvas concurrency lock.
+
+To restore a saved syllabus, review the live version, compute its current hash, and submit the saved body through the same guarded tool. The tool never publishes a course or syncs a Blueprint.
 
 ### Enabling image upload
 
