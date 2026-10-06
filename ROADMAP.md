@@ -34,7 +34,7 @@ Each future feature needs its own narrow tool contract, least-privilege credenti
 
 ### Maintenance
 
-- Syllabus-body editing needs a dedicated tool restricted to `syllabus_body`, with backup, exact course confirmation, read-back verification, and tests rejecting unrelated course-setting fields. It must not introduce a generic course-update endpoint.
+- Syllabus-body editing is implemented through `canvas_update_syllabus`, restricted to `syllabus_body` with a recovery preview, reviewed-content hash, exact course confirmation, and read-back verification. Generic course-setting updates remain deferred.
 - Blueprint synchronization needs a separate review of associated-course impact and pending changes; authorization to edit Blueprint content alone must not trigger a sync.
 
 - Report stale content, broken links, unpublished items, and configuration drift using reads first.

@@ -8,6 +8,7 @@ repository files, included in tool output, or logged.
 from __future__ import annotations
 
 import json
+import hashlib
 import ipaddress
 import math
 import os
@@ -26,7 +27,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.10.0"
+SERVER_VERSION = "0.11.0"
 PROTOCOL_VERSION = "2025-03-26"
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 IMAGE_CONTENT_TYPES = {
@@ -1244,7 +1245,64 @@ def content_delete(course_id: int, confirmation: Any, resource: str, path: str) 
     return request_api("DELETE", path)
 
 
+def update_syllabus(args: dict[str, Any]) -> dict[str, Any]:
+    """Preview or replace only syllabus_body on one explicitly approved course."""
+    allowed = {"course_id", "syllabus_body", "expected_sha256", "dry_run", "confirmation"}
+    if set(args) - allowed:
+        raise ValueError("Unexpected syllabus arguments; course settings are not supported.")
+    course_id = require_course_id(args.get("course_id"))
+    body = args.get("syllabus_body")
+    if not isinstance(body, str) or not body.strip():
+        raise ValueError("syllabus_body must be a non-empty string.")
+    digest = args.get("expected_sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("expected_sha256 must be the SHA-256 of the reviewed current syllabus.")
+    dry_run = require_boolean(args.get("dry_run", True), "dry_run")
+    require_write_approval(course_id, args.get("confirmation"), "SYLLABUS")
+    path = f"/api/v1/courses/{course_id}"
+    before = api_get(path, {"include[]": "syllabus_body"})
+    if before.get("id") != course_id or not isinstance(before.get("syllabus_body"), str):
+        raise ValueError("Canvas did not return the requested course and syllabus body.")
+    previous = before["syllabus_body"]
+    if hashlib.sha256(previous.encode("utf-8")).hexdigest() != digest:
+        raise ValueError("Syllabus changed since review; read it again before updating.")
+    result = {"course_id": course_id, "dry_run": dry_run, "previous_syllabus_body": previous,
+              "previous_sha256": digest, "syllabus_body": body}
+    if dry_run:
+        return result
+    # Never forward caller-supplied dictionaries or other course fields.
+    request_api("PUT", path, data={"course": {"syllabus_body": body}})
+    saved = api_get(path, {"include[]": "syllabus_body"})
+    if saved.get("id") != course_id or saved.get("syllabus_body") != body:
+        raise RuntimeError("Syllabus write occurred but exact read-back failed; inspect before retrying.")
+    protected = ("name", "course_code", "workflow_state", "default_view", "blueprint",
+                 "blueprint_restrictions", "public_syllabus", "public_syllabus_to_auth",
+                 "syllabus_course_summary", "start_at", "end_at", "account_id",
+                 "enrollment_term_id", "time_zone", "is_public", "is_public_to_auth_users",
+                 "restrict_enrollments_to_course_dates", "grading_standard_id")
+    if any(before.get(key) != saved.get(key) for key in protected):
+        raise RuntimeError("Syllabus write occurred but course settings differ on read-back; inspect before retrying.")
+    return {**result, "verified": True}
+
+
 TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "canvas_update_syllabus",
+        "description": "Preview or replace only one course's syllabus body. Requires exact-course write approval, an expected SHA-256 of the reviewed current body, and client approval. Defaults to dry-run with recovery content; writes are read back and verified. Does not change course settings or sync Blueprints.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "course_id": {"type": "integer", "minimum": 1},
+                "syllabus_body": {"type": "string", "minLength": 1},
+                "expected_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "dry_run": {"type": "boolean", "default": True},
+                "confirmation": {"type": "string"}
+            },
+            "required": ["course_id", "syllabus_body", "expected_sha256", "confirmation"],
+            "additionalProperties": False
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False}
+    },
     {
         "name": "canvas_get_current_user",
         "description": "Read the authenticated Canvas user's profile. Read-only.",
@@ -1651,6 +1709,8 @@ TOOLS: list[dict[str, Any]] = [
 
 
 def call_tool(name: str, args: dict[str, Any]) -> Any:
+    if name == "canvas_update_syllabus":
+        return update_syllabus(args)
     if name == "canvas_get_current_user":
         return api_get("/api/v1/users/self")
     if name == "canvas_list_modules":

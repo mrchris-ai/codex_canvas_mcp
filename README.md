@@ -38,6 +38,7 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_get_write_policy` | Inspect local policy state | Available |
 | `canvas_upload_image` | Upload one verified image from the configured trusted folder | Blocked |
 | `canvas_write_page` | Create or update one page | Blocked |
+| `canvas_update_syllabus` | Preview, replace, and verify only a course syllabus body | Blocked |
 | `canvas_create_module` | Create one module | Blocked |
 | `canvas_create_module_item` | Place one content item in a module | Blocked |
 | `canvas_create_assignment` | Create one assignment | Blocked |
@@ -154,7 +155,11 @@ Before editing, use `canvas_read_api` to verify the target course's `blueprint` 
 
 Preserve the original content, use the resource-specific write tool and exact confirmation phrase, and read the saved resource back through the MCP. Publishing or updating a page in the Blueprint is separate from syncing it to associated courses. This connector does not provide Blueprint synchronization.
 
-The course syllabus is not a Canvas Page. It can be inspected with `canvas_read_api` at `/api/v1/courses/<course_id>` using `include[]=syllabus_body`, but no syllabus-writing tool is currently available. Report that limitation before proposing another editing route; do not substitute `canvas_write_page` for a syllabus update.
+The course syllabus is not a Canvas Page. Inspect it with `canvas_read_api` at `/api/v1/courses/<course_id>` using `include[]=syllabus_body`, then use `canvas_update_syllabus` for body-only changes. The endpoint is documented in the [Canvas Courses API](https://developerdocs.instructure.com/services/canvas/resources/courses#method.courses.update).
+
+The syllabus tool requires the exact course allowlist, `APPROVE CANVAS SYLLABUS WRITE course <course_id>`, client approval, and `expected_sha256` calculated from the reviewed current UTF-8 syllabus body. It defaults to `dry_run: true`, returning the original body for recovery. Save that recovery content before explicitly setting `dry_run: false`. The only outgoing field is `course[syllabus_body]`; extra arguments and empty bodies are rejected. It reads the course back and verifies exact body equality and protected course settings. If Canvas normalizes the HTML or a setting differs, the tool reports a verification failure after the write; inspect live state before retrying. The hash check detects changes before the PUT but is not an atomic Canvas concurrency lock.
+
+To restore a saved syllabus, review the live version, compute its current hash, and submit the saved body through the same guarded tool. The tool never publishes a course or syncs a Blueprint.
 
 ### Enabling image upload
 
