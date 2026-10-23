@@ -27,7 +27,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.14.0"
+SERVER_VERSION = "0.14.1"
 PROTOCOL_VERSION = "2025-03-26"
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 IMAGE_CONTENT_TYPES = {
@@ -1472,7 +1472,9 @@ def provisioning_target(args: dict[str, Any], kind: str, apply: bool) -> dict[st
     target = {}
     for key in sorted(fields):
         value = args[key]
-        if key.endswith("_id") and key != "sis_user_id":
+        if kind == "instructor" and key == "section_id" and type(value) is int and value == 0:
+            target[key] = 0  # Explicit default-section request for an empty blank shell only.
+        elif key.endswith("_id") and key != "sis_user_id":
             target[key] = require_positive_id(value, key)
         else:
             target[key] = require_text(value, key)
@@ -1591,9 +1593,22 @@ def instructor_preflight(target: dict[str, Any]) -> tuple[dict[str, Any], list[d
     if not isinstance(course, dict) or course.get("id") != course_id or course.get("workflow_state") not in {"unpublished", "available"}:
         raise ValueError("The course is not available for instructor enrollment.")
     account_id = require_positive_id(course.get("account_id"), "account_id")
-    section = api_get(f"/api/v1/sections/{target['section_id']}")
-    if not isinstance(section, dict) or section.get("id") != target["section_id"] or section.get("course_id") != course_id:
-        raise ValueError("The section does not belong to the exact course.")
+    if target["section_id"] == 0:
+        # Canvas may create a blank shell's default section only on its first enrollment.
+        # Zero is not a wildcard for an existing section or for a populated course.
+        if course.get("workflow_state") != "unpublished" or course.get("sis_course_id") or course.get("blueprint") or course.get("template") or any(
+            course.get(key) not in (False, None) for key in
+            ("is_public", "is_public_to_auth_users", "public_syllabus", "public_syllabus_to_auth", "open_enrollment", "self_enrollment")
+        ):
+            raise ValueError("Default-section invitation requires a private unpublished non-SIS blank shell.")
+        if provisioning_list(f"/api/v1/courses/{course_id}/sections", {}):
+            raise ValueError("A section already exists; approve its exact section ID instead.")
+        if provisioning_list(f"/api/v1/courses/{course_id}/enrollments", {"state[]": ENROLLMENT_STATES}):
+            raise ValueError("Default-section invitation requires a course with no enrollments.")
+    else:
+        section = api_get(f"/api/v1/sections/{target['section_id']}")
+        if not isinstance(section, dict) or section.get("id") != target["section_id"] or section.get("course_id") != course_id:
+            raise ValueError("The section does not belong to the exact course.")
     user = api_get(f"/api/v1/users/{target['canvas_user_id']}/profile")
     if not isinstance(user, dict) or user.get("id") != target["canvas_user_id"] or user.get("sis_user_id") != target["sis_user_id"]:
         raise ValueError("Canvas user and SIS user IDs do not match.")
@@ -1622,7 +1637,9 @@ def preview_instructor_enrollment(args: dict[str, Any]) -> dict[str, Any]:
     context, records = instructor_preflight(target)
     return {**target, **context, "existing_enrollment": records[0]["id"] if records else None,
             "confirmation": provisioning_confirmation("instructor", target),
-            "effect": "Invite this existing instructor with the exact role and section; notify via Canvas. An identical active/invited enrollment is a no-op."}
+            "effect": ("Invite this instructor into Canvas's default section of this empty shell and verify the generated section; notify via Canvas."
+                       if target["section_id"] == 0 else
+                       "Invite this existing instructor with the exact role and section; notify via Canvas. An identical active/invited enrollment is a no-op.")}
 
 
 def enroll_instructor(args: dict[str, Any]) -> dict[str, Any]:
@@ -1634,20 +1651,27 @@ def enroll_instructor(args: dict[str, Any]) -> dict[str, Any]:
                 "enrollment_state": records[0]["enrollment_state"], "role": target["role_name"]}
     enrollment_id = None
     try:
-        created = request_api("POST", f"/api/v1/courses/{target['course_id']}/enrollments", data={"enrollment": {
-            "user_id": target["canvas_user_id"], "type": "TeacherEnrollment", "role_id": target["role_id"],
-            "course_section_id": target["section_id"], "enrollment_state": "invited",
-            "limit_privileges_to_course_section": False, "notify": True,
-        }})
+        enrollment = {"user_id": target["canvas_user_id"], "type": "TeacherEnrollment", "role_id": target["role_id"],
+                      "enrollment_state": "invited", "limit_privileges_to_course_section": False, "notify": True}
+        if target["section_id"]:
+            enrollment["course_section_id"] = target["section_id"]
+        created = request_api("POST", f"/api/v1/courses/{target['course_id']}/enrollments", data={"enrollment": enrollment})
         enrollment_id = require_positive_id(created.get("id"), "created enrollment_id")
+        verified_target = dict(target)
+        if target["section_id"] == 0:
+            sections = provisioning_list(f"/api/v1/courses/{target['course_id']}/sections", {})
+            if len(sections) != 1 or sections[0].get("course_id") != target["course_id"] or sections[0].get("sis_section_id") or sections[0].get("nonxlist_course_id"):
+                raise ValueError("Canvas did not produce one local default section in the approved course.")
+            verified_target["section_id"] = sections[0]["id"]
         after = provisioning_list(f"/api/v1/courses/{target['course_id']}/enrollments",
                                  {"user_id": target["canvas_user_id"], "state[]": ENROLLMENT_STATES})
-        if len(after) != 1 or after[0]["id"] != enrollment_id or not instructor_matches(after[0], target) or after[0].get("enrollment_state") not in {"invited", "active"} or after[0].get("limit_privileges_to_course_section") is not False:
+        if len(after) != 1 or after[0]["id"] != enrollment_id or not instructor_matches(after[0], verified_target) or after[0].get("enrollment_state") not in {"invited", "active"} or after[0].get("limit_privileges_to_course_section") is not False:
             raise ValueError("Instructor enrollment did not match on read-back.")
     except Exception as exc:
         raise RuntimeError(f"Enrollment outcome needs inspection (enrollment ID: {enrollment_id}). Do not automatically retry; inspect the course roster first.") from exc
     return {"changed": True, "verified": True, "enrollment_id": enrollment_id,
             "enrollment_state": after[0]["enrollment_state"], "role": target["role_name"],
+            "section_id": verified_target["section_id"],
             "course_url": f"{canvas_base_url()}/courses/{target['course_id']}"}
 
 
@@ -1758,8 +1782,9 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string"
                 },
                 "section_id": {
-                    "minimum": 1,
-                    "type": "integer"
+                    "minimum": 0,
+                    "type": "integer",
+                    "description": "Exact section ID, or 0 to request Canvas's default section only for a private unpublished non-SIS course with no sections or enrollments."
                 },
                 "sis_user_id": {
                     "maxLength": 255,
@@ -1810,8 +1835,9 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string"
                 },
                 "section_id": {
-                    "minimum": 1,
-                    "type": "integer"
+                    "minimum": 0,
+                    "type": "integer",
+                    "description": "Exact section ID, or 0 to request Canvas's default section only for a private unpublished non-SIS course with no sections or enrollments."
                 },
                 "sis_user_id": {
                     "maxLength": 255,
