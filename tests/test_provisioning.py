@@ -1,5 +1,7 @@
 """Provisioning safety tests. All Canvas/network/credential boundaries are mocked."""
 import copy
+import io
+from email.message import Message
 import json
 import os
 from pathlib import Path
@@ -35,6 +37,8 @@ class ProvisioningTests(unittest.TestCase):
                        "approved_course_creation_account_ids": [],
                        "approved_instructor_enrollment_course_ids": [], "approved_instructor_role_ids": [60]}
         self.read = mock.patch.object(server, "api_get", side_effect=self.fake_read).start()
+        self.pages = mock.patch.object(server, "api_get_page",
+            side_effect=lambda path, query: (self.read(path, {**query, "page": 1}), "")).start()
         self.write = mock.patch.object(server, "request_api", side_effect=self.fake_write).start()
         mock.patch.object(server, "write_policy", return_value=self.policy).start()
         mock.patch.object(server, "canvas_base_url", return_value="https://canvas.example.edu").start()
@@ -241,15 +245,30 @@ class ProvisioningTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.apply("instructor")
         self.write.assert_not_called()
 
-    def test_short_pages_are_followed_and_bad_pagination_fails_closed(self):
-        self.read.side_effect = [[{"id":1}], [{"id":2}], []]
-        self.assertEqual(len(server.provisioning_list("/api/v1/example", {})),2)
-        self.assertEqual([call.args[1]["page"] for call in self.read.call_args_list], [1, 2, 3])
-        for result in ([{"id":1}], {}, [{"id":True}], [{"id":0}], [None]):
-            self.read.side_effect=None; self.read.return_value=result
-            with self.subTest(result=result), self.assertRaises(RuntimeError): server.provisioning_list("/api/v1/example", {})
-        self.read.side_effect=[[{"id":i}] for i in range(1,101)]
-        with self.assertRaises(RuntimeError): server.provisioning_list("/api/v1/example", {})
+    def test_canvas_next_links_are_followed_without_inventing_page_two(self):
+        link = '<https://canvas.example.edu/api/v1/example?page=opaque%3Acursor&per_page=100>; rel="next"'
+        self.pages.side_effect = [([{"id":1}], link), ([{"id":2}], "")]
+        self.assertEqual(len(server.provisioning_list("/api/v1/example", {})), 2)
+        self.assertEqual(self.pages.call_args_list[1].args, ("/api/v1/example", "page=opaque%3Acursor&per_page=100"))
+        self.pages.reset_mock()
+        self.pages.side_effect = [([{"id":1}], "")]
+        self.assertEqual(len(server.provisioning_list("/api/v1/example", {})), 1)
+        self.pages.assert_called_once()
+
+    def test_bad_pagination_fails_closed(self):
+        for bad in ({}, [{"id":True}], [{"id":0}], [None]):
+            self.pages.side_effect = [(bad, "")]
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError): server.provisioning_list("/api/v1/example", {})
+        for url in ("https://evil.example/api/v1/example?page=2", "http://canvas.example.edu/api/v1/example?page=2",
+                    "https://canvas.example.edu/api/v1/other?page=2", "https://user@canvas.example.edu/api/v1/example?page=2",
+                    "https://canvas.example.edu/api/v1/example?page=2#fragment"):
+            self.pages.side_effect = [([], '<'+url+'>; rel="next"')]
+            with self.subTest(url=url), self.assertRaises(RuntimeError): server.provisioning_list("/api/v1/example", {})
+        link = '<https://canvas.example.edu/api/v1/example?page=opaque>; rel="next"'
+        for pages in ([([{"id":1}],link),([{"id":1}],"")], [([],link),([],link)],
+                      [([],link+", "+link)], [([], 'invalid; rel="next"')]):
+            self.pages.side_effect = pages
+            with self.assertRaises(RuntimeError): server.provisioning_list("/api/v1/example", {})
         self.write.assert_not_called()
 
     def test_uncertain_creation_and_readback_never_retry_or_claim_success(self):
@@ -276,6 +295,22 @@ class ProvisioningTests(unittest.TestCase):
             self.assertEqual(set(tool["inputSchema"]["properties"]),expected)
             self.assertEqual(set(tool["inputSchema"]["required"]),expected)
             if write: self.assertTrue(tool["annotations"]["destructiveHint"])
+
+
+class PaginationTransportTests(unittest.TestCase):
+    def test_link_header_is_retained_case_insensitively_and_query_stays_opaque(self):
+        response = io.BytesIO(b'[{"id":1}]')
+        response.headers = Message()
+        response.headers['lInK'] = '<https://canvas.example.edu/api/v1/example?cursor=next>; rel="next"'
+        with mock.patch.object(server, "canvas_base_url", return_value="https://canvas.example.edu"), \
+             mock.patch.object(server, "canvas_token", return_value="unit-test-placeholder"), \
+             mock.patch.object(server.urllib.request, "urlopen", return_value=response) as network:
+            data, links = server.api_get_page("/api/v1/example", "cursor=opaque%2Bvalue")
+            self.assertEqual(data, [{"id":1}])
+            self.assertIn('rel="next"', links)
+            self.assertEqual(network.call_args.args[0].full_url, "https://canvas.example.edu/api/v1/example?cursor=opaque%2Bvalue")
+        with self.assertRaises(ValueError):
+            server.request_api("POST", "/api/v1/example", _include_links=True)
 
 
 class ProvisioningPolicyTests(unittest.TestCase):

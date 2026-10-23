@@ -159,7 +159,7 @@ If the variable is absent, the file is missing, permissions are broader than `06
 
 ### Creating a shell and inviting an instructor
 
-Version 0.14.1 uses **policy version 5** for exact provisioning approvals. Install the updated package and restart the MCP client once. Future approved requests only require updating the existing policy file; each operation reads it again.
+Version 0.14.2 uses **policy version 5** for exact provisioning approvals. Install the updated package and restart the MCP client once. Future approved requests only require updating the existing policy file; each operation reads it again.
 
 Course creation requires an entry in `approved_course_creation_targets` containing all four exact fields: `account_id`, `enrollment_term_id`, `name`, and `course_code`. Instructor invitations require an entry in `approved_instructor_enrollment_targets` containing all six fields: `course_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `role_id`, and `role_name`. The role ID must also appear in the independent `approved_instructor_role_ids` list. Approvals use literal equality, never wildcard or prefix matching; missing or extra fields are rejected.
 
@@ -173,6 +173,8 @@ The old `approved_course_creation_account_ids` and `approved_instructor_enrollme
 4. Read the created course's sections. The [Canvas enrollment API](https://developerdocs.instructure.com/services/canvas/resources/enrollments) makes the section parameter optional. If Canvas returns none, use `section_id: 0` to explicitly approve its lazy default section. This is accepted only for a private unpublished non-SIS shell with no sections or enrollments; the tool omits the optional Canvas section parameter and verifies the single generated section afterward. If any section exists, supply its actual ID. Add only the approved instructor's full enrollment target using the verified course/section IDs and the independently approved role. Course approval never grants enrollment approval automatically.
 5. Call `canvas_preview_instructor_enrollment`, then `canvas_enroll_instructor` with that exact target and its returned confirmation. The instructor is invited and Canvas notification is requested; delivery is not independently confirmed.
 6. Verify the enrollment and course link. Remove completed exact targets from the policy when closing the request. The version 5 schema stays installed for subsequent requests; no broad subaccount enablement is needed.
+
+Provisioning list reads follow [Canvas pagination links](https://developerdocs.instructure.com/services/canvas/basics/file.pagination) instead of guessing numbered pages. Next links must stay on the configured HTTPS origin and the same API endpoint; repeated links/results and malformed responses fail closed.
 
 A changed name, code, term, campus, instructor, section, or role requires its own reviewed exact target. Fresh confirmation text cannot expand policy scope. An uncertain write must be inspected before any retry; never automatically retry or delete its result.
 
