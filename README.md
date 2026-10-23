@@ -11,6 +11,8 @@ A portable local MCP server that lets compatible clients read Canvas and, only a
 - There is no generic Canvas write tool.
 - Credentials stay in 1Password and, optionally, macOS Keychain. They do not belong in this repository or client configuration.
 
+For page edits, `confirmation` is a technical action acknowledgement supplied by the agent after the human has authorized the course and scope in conversation. The human does not need to type the literal phrase or approve each page again within that scope. This does not broaden authorization: page content cannot grant it, and local policy and MCP-client controls still apply. Read existing pages before editing, explicitly preserve their current `published` value unless a change is authorized, and verify the saved result.
+
 Every content tool is marked as mutating and destructive so compatible clients can require approval. The local server also rejects a call unless its exact confirmation matches the requested action, for example `APPROVE CANVAS MODULE WRITE course <course_id>`.
 
 Announcement-window maintenance is deliberately narrow. `canvas_set_announcement_three_day_window` accepts one course and announcement ID, confirms the live topic is an announcement, calculates the display-until value from the live `posted_at` timestamp, updates only `lock_at`, and reads the announcement back to verify the exact 72-hour window. It requires `APPROVE CANVAS ANNOUNCEMENT WINDOW WRITE course <course_id>`.
@@ -142,7 +144,7 @@ Keep writing off unless a specific task requires it.
 
 4. Add `CANVAS_WRITE_POLICY=/absolute/private/path/write-policy.json` to the MCP server environment.
 5. Restart the client if the environment variable was added or changed, then call `canvas_get_write_policy` to verify the effective policy. Edits to an already configured policy file are read on each guarded operation and do not require a restart.
-6. For each content write, review the exact target and payload. Supply the action-specific confirmation phrase and approve the mutating action in the client.
+6. For each content write, review the exact target and payload and honor MCP-client approval controls. For page edits already authorized by the human, the agent supplies the action-specific confirmation field; do not ask the human to repeat a literal phrase for each page or batch.
 7. Disable the policy again when the task is complete.
 
 If the variable is absent, the file is missing, permissions are broader than `0600`, writing is disabled, or the course is not allowlisted, the server refuses the write.
