@@ -27,7 +27,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.12.0"
+SERVER_VERSION = "0.13.0"
 PROTOCOL_VERSION = "2025-03-26"
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 IMAGE_CONTENT_TYPES = {
@@ -187,11 +187,14 @@ def api_get(path: str, query: dict[str, Any] | None = None) -> Any:
 
 def disabled_policy() -> dict[str, Any]:
     return {
-        "version": 3,
+        "version": 4,
         "enabled": False,
         "approved_course_ids": [],
         "approved_rubric_delete_course_ids": [],
         "approved_student_deactivation_course_ids": [],
+        "approved_course_creation_account_ids": [],
+        "approved_instructor_enrollment_course_ids": [],
+        "approved_instructor_role_ids": [],
     }
 
 
@@ -216,13 +219,17 @@ def write_policy() -> dict[str, Any]:
         raise ConfigurationError("The Canvas write policy must be a JSON object.")
     version = policy.get("version")
     expected_keys = {"version", "enabled", "approved_course_ids"}
-    if version in {2, 3}:
+    if version in {2, 3, 4}:
         expected_keys.add("approved_rubric_delete_course_ids")
-    if version == 3:
+    if version in {3, 4}:
         expected_keys.add("approved_student_deactivation_course_ids")
+    provision_keys = ("approved_course_creation_account_ids",
+                      "approved_instructor_enrollment_course_ids", "approved_instructor_role_ids")
+    if version == 4:
+        expected_keys.update(provision_keys)
     if set(policy) != expected_keys:
         raise ConfigurationError("The Canvas write policy contains unexpected keys.")
-    if version not in {1, 2, 3} or not isinstance(policy["enabled"], bool):
+    if type(version) is not int or version not in {1, 2, 3, 4} or not isinstance(policy["enabled"], bool):
         raise ConfigurationError("The Canvas write policy has invalid version or enabled values.")
     course_ids = policy["approved_course_ids"]
     if not isinstance(course_ids, list) or any(
@@ -255,8 +262,17 @@ def write_policy() -> dict[str, Any]:
         raise ConfigurationError(
             "approved_student_deactivation_course_ids must not contain duplicates."
         )
+    provision_policy = {}
+    for key in provision_keys:
+        values = policy.get(key, [])
+        if not isinstance(values, list) or any(type(v) is not int or v <= 0 for v in values):
+            raise ConfigurationError(f"{key} must contain only positive integers.")
+        if len(values) != len(set(values)):
+            raise ConfigurationError(f"{key} must not contain duplicates.")
+        provision_policy[key] = values
     return {
-        "version": 3,
+        **provision_policy,
+        "version": 4,
         "enabled": policy["enabled"],
         "approved_course_ids": course_ids,
         "approved_rubric_delete_course_ids": rubric_delete_course_ids,
@@ -1419,7 +1435,380 @@ def deactivate_student_enrollment(args: dict[str, Any]) -> dict[str, Any]:
     return {"changed": True, "verified": True, "enrollment_state": "inactive", "enrollment_id": enrollment_id}
 
 
+# Provisioning is deliberately separate from content authoring and student deactivation.
+# No caller-supplied paths, arbitrary settings, enrollment states, or base roles.
+PROVISIONING_FIELDS = {
+    "course": {"account_id", "enrollment_term_id", "name", "course_code"},
+    "instructor": {"course_id", "section_id", "canvas_user_id", "sis_user_id", "role_id", "role_name"},
+}
+ENROLLMENT_STATES = ["active", "invited", "creation_pending", "deleted", "rejected", "completed", "inactive"]
+
+
+def provisioning_target(args: dict[str, Any], kind: str, apply: bool) -> dict[str, Any]:
+    fields = PROVISIONING_FIELDS[kind]
+    if set(args) != fields | ({"confirmation"} if apply else set()):
+        raise ValueError("Provisioning requires only the exact documented target fields.")
+    target = {}
+    for key in sorted(fields):
+        value = args[key]
+        if key.endswith("_id") and key != "sis_user_id":
+            target[key] = require_positive_id(value, key)
+        else:
+            target[key] = require_text(value, key)
+            if value != value.strip() or any(ord(c) < 32 for c in value):
+                raise ValueError(f"{key} must not contain control characters or surrounding whitespace.")
+    if kind == "course" and any(len(target[key]) < 3 for key in ("name", "course_code")):
+        raise ValueError("name and course_code must have at least three characters for duplicate checking.")
+    return target
+
+
+def provisioning_confirmation(kind: str, target: dict[str, Any]) -> str:
+    digest = hashlib.sha256(json.dumps(target, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+    action = "COURSE CREATE" if kind == "course" else "INSTRUCTOR ENROLLMENT"
+    return f"APPROVE CANVAS {action} {digest}"
+
+
+def provisioning_approval(kind: str, target: dict[str, Any], confirmation: Any) -> None:
+    policy = write_policy()
+    checks = (("approved_course_creation_account_ids", "account_id"),) if kind == "course" else (
+        ("approved_instructor_enrollment_course_ids", "course_id"),
+        ("approved_instructor_role_ids", "role_id"),
+    )
+    if not policy["enabled"] or any(target[field] not in policy.get(key, []) for key, field in checks):
+        raise PermissionError("Provisioning is disabled or the exact target/role is not locally approved.")
+    expected = provisioning_confirmation(kind, target)
+    if confirmation != expected:
+        raise PermissionError(f"Confirmation must exactly match the preview: {expected}")
+
+
+def provisioning_list(path: str, query: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read numbered pages through an empty page, including server-capped short pages.
+
+    Fail closed on malformed, repeated, or excessive results. These Canvas list
+    endpoints document page/per_page; no response links or arbitrary URLs are followed.
+    """
+    records: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for page in range(1, 101):
+        batch = api_get(path, {**query, "per_page": 100, "page": page})
+        if not isinstance(batch, list):
+            raise RuntimeError("Cannot verify the complete provisioning result list.")
+        if not batch:
+            return records
+        for item in batch:
+            if not isinstance(item, dict) or type(item.get("id")) is not int or item["id"] <= 0 or item["id"] in seen:
+                raise RuntimeError("Malformed or repeated provisioning results; refusing to write.")
+            seen.add(item["id"])
+            records.append(item)
+    raise RuntimeError("Provisioning result pagination exceeded the safety limit; narrow the target.")
+
+
+def course_creation_preflight(target: dict[str, Any]) -> dict[str, Any]:
+    account_id, term_id = target["account_id"], target["enrollment_term_id"]
+    account = api_get(f"/api/v1/accounts/{account_id}")
+    if not isinstance(account, dict) or account.get("id") != account_id or account.get("workflow_state") != "active":
+        raise ValueError("The target account is not active or does not match.")
+    root_id = require_positive_id(account.get("root_account_id"), "root_account_id")
+    require_positive_id(account.get("parent_account_id"), "parent_account_id")
+    if root_id == account_id:
+        raise ValueError("Course creation is limited to explicitly approved subaccounts, not root accounts.")
+    term = api_get(f"/api/v1/accounts/{root_id}/terms/{term_id}")
+    if not isinstance(term, dict) or term.get("id") != term_id or term.get("workflow_state") != "active":
+        raise ValueError("The term is not active or does not belong to the target root account.")
+    # Check both names and codes; search results include descendant accounts, which
+    # are filtered to the exact destination. Never reuse or reactivate an old course.
+    for search in set((target["name"], target["course_code"])):
+        courses = provisioning_list(f"/api/v1/accounts/{account_id}/courses", {"search_term": search})
+        if any(c.get("account_id") == account_id and (
+            c.get("name") == target["name"] or c.get("course_code") == target["course_code"]
+        ) for c in courses):
+            raise ValueError("A matching course name or code already exists. Inspect it before retrying; no course created.")
+    return {"account_name": account.get("name"), "root_account_id": root_id, "term_name": term.get("name")}
+
+
+def preview_course_creation(args: dict[str, Any]) -> dict[str, Any]:
+    target = provisioning_target(args, "course", False)
+    context = course_creation_preflight(target)
+    return {**target, **context, "confirmation": provisioning_confirmation("course", target),
+            "effect": "Create one private, unpublished blank shell; skip account template and self-enrollment. Instructor enrollment requires a separate exact-course approval."}
+
+
+def create_course_shell(args: dict[str, Any]) -> dict[str, Any]:
+    target = provisioning_target(args, "course", True)
+    provisioning_approval("course", target, args["confirmation"])
+    course_creation_preflight(target)
+    data = {"course": {"name": target["name"], "course_code": target["course_code"],
+                       "term_id": target["enrollment_term_id"], "is_public": False,
+                       "is_public_to_auth_users": False, "public_syllabus": False,
+                       "public_syllabus_to_auth": False, "open_enrollment": False,
+                       "self_enrollment": False},
+            "offer": False, "enroll_me": False, "skip_course_template": True}
+    course_id = None
+    try:
+        created = request_api("POST", f"/api/v1/accounts/{target['account_id']}/courses", data=data)
+        course_id = require_positive_id(created.get("id"), "created course_id")
+        saved = api_get(f"/api/v1/courses/{course_id}")
+        expected = {"id": course_id, **target, "workflow_state": "unpublished"}
+        if any(saved.get(k) != v for k, v in expected.items()):
+            raise ValueError("Created course fields do not match.")
+        if any(saved.get(k) not in (False, None) for k in (
+            "is_public", "is_public_to_auth_users", "public_syllabus", "public_syllabus_to_auth",
+            "open_enrollment", "self_enrollment",
+        )) or saved.get("sis_course_id") or saved.get("blueprint") or saved.get("template"):
+            raise ValueError("Created course visibility or ownership does not match.")
+    except Exception as exc:
+        raise RuntimeError(f"Course creation outcome needs inspection (course ID: {course_id}). Do not automatically retry or delete; verify Canvas first.") from exc
+    return {"changed": True, "verified": True, "course_id": course_id, **target,
+            "workflow_state": "unpublished", "course_url": f"{canvas_base_url()}/courses/{course_id}"}
+
+
+def instructor_preflight(target: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    course_id = target["course_id"]
+    course = api_get(f"/api/v1/courses/{course_id}")
+    if not isinstance(course, dict) or course.get("id") != course_id or course.get("workflow_state") not in {"unpublished", "available"}:
+        raise ValueError("The course is not available for instructor enrollment.")
+    account_id = require_positive_id(course.get("account_id"), "account_id")
+    section = api_get(f"/api/v1/sections/{target['section_id']}")
+    if not isinstance(section, dict) or section.get("id") != target["section_id"] or section.get("course_id") != course_id:
+        raise ValueError("The section does not belong to the exact course.")
+    user = api_get(f"/api/v1/users/{target['canvas_user_id']}/profile")
+    if not isinstance(user, dict) or user.get("id") != target["canvas_user_id"] or user.get("sis_user_id") != target["sis_user_id"]:
+        raise ValueError("Canvas user and SIS user IDs do not match.")
+    roles = provisioning_list(f"/api/v1/accounts/{account_id}/roles", {"show_inherited": True})
+    role = next((r for r in roles if r["id"] == target["role_id"]), None)
+    if not role or role.get("label") != target["role_name"] or role.get("base_role_type") != "TeacherEnrollment" or role.get("workflow_state") != "active":
+        raise ValueError("The exact active TeacherEnrollment role is not available in this course's account.")
+    records = provisioning_list(f"/api/v1/courses/{course_id}/enrollments",
+                                {"user_id": target["canvas_user_id"], "state[]": ENROLLMENT_STATES})
+    # Do not silently change, restore, or add competing roles for an existing user.
+    if records and (len(records) != 1 or not instructor_matches(records[0], target) or records[0].get("enrollment_state") not in {"invited", "active"}):
+        raise ValueError("Existing enrollment conflicts with the requested instructor enrollment; no role or state changed.")
+    return {"course_name": course.get("name"), "account_id": account_id, "instructor_name": user.get("name")}, records
+
+
+def instructor_matches(record: dict[str, Any], target: dict[str, Any]) -> bool:
+    expected = {"course_id": target["course_id"], "course_section_id": target["section_id"],
+                "user_id": target["canvas_user_id"], "sis_user_id": target["sis_user_id"],
+                "role_id": target["role_id"], "role": target["role_name"], "type": "TeacherEnrollment",
+                "limit_privileges_to_course_section": False}
+    return all(record.get(k) == v for k, v in expected.items())
+
+
+def preview_instructor_enrollment(args: dict[str, Any]) -> dict[str, Any]:
+    target = provisioning_target(args, "instructor", False)
+    context, records = instructor_preflight(target)
+    return {**target, **context, "existing_enrollment": records[0]["id"] if records else None,
+            "confirmation": provisioning_confirmation("instructor", target),
+            "effect": "Invite this existing instructor with the exact role and section; notify via Canvas. An identical active/invited enrollment is a no-op."}
+
+
+def enroll_instructor(args: dict[str, Any]) -> dict[str, Any]:
+    target = provisioning_target(args, "instructor", True)
+    provisioning_approval("instructor", target, args["confirmation"])
+    _, records = instructor_preflight(target)
+    if records:
+        return {"changed": False, "verified": True, "enrollment_id": records[0]["id"],
+                "enrollment_state": records[0]["enrollment_state"], "role": target["role_name"]}
+    enrollment_id = None
+    try:
+        created = request_api("POST", f"/api/v1/courses/{target['course_id']}/enrollments", data={"enrollment": {
+            "user_id": target["canvas_user_id"], "type": "TeacherEnrollment", "role_id": target["role_id"],
+            "course_section_id": target["section_id"], "enrollment_state": "invited",
+            "limit_privileges_to_course_section": False, "notify": True,
+        }})
+        enrollment_id = require_positive_id(created.get("id"), "created enrollment_id")
+        after = provisioning_list(f"/api/v1/courses/{target['course_id']}/enrollments",
+                                 {"user_id": target["canvas_user_id"], "state[]": ENROLLMENT_STATES})
+        if len(after) != 1 or after[0]["id"] != enrollment_id or not instructor_matches(after[0], target) or after[0].get("enrollment_state") not in {"invited", "active"} or after[0].get("limit_privileges_to_course_section") is not False:
+            raise ValueError("Instructor enrollment did not match on read-back.")
+    except Exception as exc:
+        raise RuntimeError(f"Enrollment outcome needs inspection (enrollment ID: {enrollment_id}). Do not automatically retry; inspect the course roster first.") from exc
+    return {"changed": True, "verified": True, "enrollment_id": enrollment_id,
+            "enrollment_state": after[0]["enrollment_state"], "role": target["role_name"],
+            "course_url": f"{canvas_base_url()}/courses/{target['course_id']}"}
+
+
 TOOLS: list[dict[str, Any]] = [
+    {
+        "annotations": {
+            "readOnlyHint": True
+        },
+        "description": "Preview one private unpublished blank course shell in a subaccount; check the term and duplicates. Returns an exact confirmation bound to all requested fields. Does not write.",
+        "inputSchema": {
+            "additionalProperties": False,
+            "properties": {
+                "account_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "course_code": {
+                    "maxLength": 255,
+                    "minLength": 3,
+                    "type": "string"
+                },
+                "enrollment_term_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "name": {
+                    "maxLength": 255,
+                    "minLength": 3,
+                    "type": "string"
+                }
+            },
+            "required": [
+                "account_id",
+                "enrollment_term_id",
+                "name",
+                "course_code"
+            ],
+            "type": "object"
+        },
+        "name": "canvas_preview_course_creation"
+    },
+    {
+        "annotations": {
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "readOnlyHint": False
+        },
+        "description": "Create and verify one private unpublished blank course shell. Requires exact subaccount policy approval, the preview confirmation, human authorization and MCP-client approval. Skips templates and self-enrollment. Never retries an uncertain write.",
+        "inputSchema": {
+            "additionalProperties": False,
+            "properties": {
+                "account_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "confirmation": {
+                    "type": "string"
+                },
+                "course_code": {
+                    "maxLength": 255,
+                    "minLength": 3,
+                    "type": "string"
+                },
+                "enrollment_term_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "name": {
+                    "maxLength": 255,
+                    "minLength": 3,
+                    "type": "string"
+                }
+            },
+            "required": [
+                "account_id",
+                "enrollment_term_id",
+                "name",
+                "course_code",
+                "confirmation"
+            ],
+            "type": "object"
+        },
+        "name": "canvas_create_course_shell"
+    },
+    {
+        "annotations": {
+            "readOnlyHint": True
+        },
+        "description": "Preview one instructor invitation with exact Canvas/SIS identity, section, and TeacherEnrollment role checks. Returns the exact confirmation. Does not write.",
+        "inputSchema": {
+            "additionalProperties": False,
+            "properties": {
+                "canvas_user_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "course_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "role_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "role_name": {
+                    "maxLength": 255,
+                    "minLength": 1,
+                    "type": "string"
+                },
+                "section_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "sis_user_id": {
+                    "maxLength": 255,
+                    "minLength": 1,
+                    "type": "string"
+                }
+            },
+            "required": [
+                "course_id",
+                "section_id",
+                "canvas_user_id",
+                "sis_user_id",
+                "role_id",
+                "role_name"
+            ],
+            "type": "object"
+        },
+        "name": "canvas_preview_instructor_enrollment"
+    },
+    {
+        "annotations": {
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "readOnlyHint": False
+        },
+        "description": "Invite and verify one instructor with an approved TeacherEnrollment role, such as DSTeacher. Requires separate exact-course and role allowlists, preview confirmation, human authorization and MCP-client approval. Notifies via Canvas. Does not reactivate or change roles.",
+        "inputSchema": {
+            "additionalProperties": False,
+            "properties": {
+                "canvas_user_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "confirmation": {
+                    "type": "string"
+                },
+                "course_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "role_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "role_name": {
+                    "maxLength": 255,
+                    "minLength": 1,
+                    "type": "string"
+                },
+                "section_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "sis_user_id": {
+                    "maxLength": 255,
+                    "minLength": 1,
+                    "type": "string"
+                }
+            },
+            "required": [
+                "course_id",
+                "section_id",
+                "canvas_user_id",
+                "sis_user_id",
+                "role_id",
+                "role_name",
+                "confirmation"
+            ],
+            "type": "object"
+        },
+        "name": "canvas_enroll_instructor"
+    },
     {
         "name": "canvas_update_syllabus",
         "description": "Preview or replace only one course's syllabus body. Requires exact-course write approval, an expected SHA-256 of the reviewed current body, and client approval. Defaults to dry-run with recovery content; writes are read back and verified. Does not change course settings or sync Blueprints.",
@@ -1488,7 +1877,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "canvas_get_write_policy",
-        "description": "Show write-policy state and approved course IDs. Does not expose credentials.",
+        "description": "Show write-policy state and operation-specific account, course, and role scopes. Does not expose credentials.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": {"readOnlyHint": True},
     },
@@ -1893,6 +2282,14 @@ TOOLS: list[dict[str, Any]] = [
 def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "canvas_update_syllabus":
         return update_syllabus(args)
+    if name == "canvas_preview_course_creation":
+        return preview_course_creation(args)
+    if name == "canvas_create_course_shell":
+        return create_course_shell(args)
+    if name == "canvas_preview_instructor_enrollment":
+        return preview_instructor_enrollment(args)
+    if name == "canvas_enroll_instructor":
+        return enroll_instructor(args)
     if name == "canvas_get_current_user":
         return api_get("/api/v1/users/self")
     if name == "canvas_list_modules":

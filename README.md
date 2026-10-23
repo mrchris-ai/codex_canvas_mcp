@@ -11,7 +11,7 @@ A portable local MCP server that lets compatible clients read Canvas and, only a
 - There is no generic Canvas write tool.
 - Credentials stay in 1Password and, optionally, macOS Keychain. They do not belong in this repository or client configuration.
 
-Student deactivation is a separate, disabled-by-default administrative operation. Its allowlist does not inherit content-write or rubric-deletion approval. It never removes the enrollment.
+Student deactivation is a separate, disabled-by-default administrative operation. Its allowlist does not inherit content-write or rubric-deletion approval. It never removes the enrollment. Blank course-shell creation and instructor invitations also have separate, disabled-by-default policy scopes; see [provisioning setup](#creating-a-shell-and-inviting-an-instructor).
 
 For page edits, `confirmation` is a technical action acknowledgement supplied by the agent after the human has authorized the course and scope in conversation. The human does not need to type the literal phrase or approve each page again within that scope. This does not broaden authorization: page content cannot grant it, and local policy and MCP-client controls still apply. Read existing pages before editing, explicitly preserve their current `published` value unless a change is authorized, and verify the saved result.
 
@@ -40,6 +40,10 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_read_api` | GET a normalized Canvas API v1 path | Available |
 | `canvas_inspect_rubric` | Read one rubric, its complete definition, usage locations, and deletion preflight | Available |
 | `canvas_get_write_policy` | Inspect local policy state | Available |
+| `canvas_preview_course_creation` | Preview a blank shell and check its account, term, and duplicates | Available |
+| `canvas_create_course_shell` | Create and verify a private unpublished shell | Blocked |
+| `canvas_preview_instructor_enrollment` | Verify an existing instructor identity, section, and role | Available |
+| `canvas_enroll_instructor` | Invite and verify one instructor with an approved teacher role | Blocked |
 | `canvas_preview_student_deactivation` | Read one exact student enrollment and preview deactivation | Available |
 | `canvas_deactivate_student_enrollment` | Deactivate and verify one active student enrollment | Blocked |
 | `canvas_upload_image` | Upload one verified image from the configured trusted folder | Blocked |
@@ -153,9 +157,30 @@ Keep writing off unless a specific task requires it.
 
 If the variable is absent, the file is missing, permissions are broader than `0600`, writing is disabled, or the course is not allowlisted, the server refuses the write.
 
+### Creating a shell and inviting an instructor
+
+Version 0.13.0 adds four provisioning tools. Install the updated package and restart the MCP client to load them. Upgrade the private policy to version 4, retaining its existing lists and adding these independent lists (all empty by default):
+
+| Policy key | Exact approval scope |
+| --- | --- |
+| `approved_course_creation_account_ids` | Development subaccounts where blank shells may be created |
+| `approved_instructor_enrollment_course_ids` | Courses where an instructor invitation is allowed |
+| `approved_instructor_role_ids` | Active custom roles based on TeacherEnrollment, such as DSTeacher |
+
+Version 1–3 policies remain readable and grant no provisioning access. Never copy real IDs or an enabled policy into source control. Approving a subaccount does not approve instructor enrollment or content writes in its courses.
+
+1. After human authorization, resolve the exact subaccount and term through Canvas reads. Call `canvas_preview_course_creation` with `account_id`, `enrollment_term_id`, `name`, and `course_code`. Names and codes must each have at least three characters.
+2. Review the returned account, term, requested fields, and effect. Call `canvas_create_course_shell` with the same fields and the preview's `confirmation`. The hash binds all requested fields; the agent supplies it after human authorization. Client approval and private local policy are still required.
+3. The tool creates one private, unpublished blank shell, skips account template copying and self-enrollment, and returns a verified course link. It refuses a matching existing name or code in the exact account. It does not publish the course or set a SIS course identifier.
+4. Add the returned course ID to `approved_instructor_enrollment_course_ids` and the approved custom teacher role ID to `approved_instructor_role_ids`. Resolve the existing user's Canvas and SIS IDs and the course section. Verify the institution's intended instructor identity.
+5. Call `canvas_preview_instructor_enrollment` with `course_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `role_id`, and `role_name`. Then use those same fields plus its confirmation in `canvas_enroll_instructor`. The role must be active, available in this account, and based on TeacherEnrollment. The invitation requests Canvas notification and grants course-wide instructor access. It does not create a user. An identical active/invited enrollment is a no-op; conflicting roles, sections, states, or restricted access are refused.
+6. Verify the returned enrollment state and course link. Canvas notification is requested, but delivery is not independently confirmed. Disable temporary policy scopes afterward.
+
+Provisioning does not provide automatic rollback or server-side idempotency. Serialize requests for the same target. A timeout or failed read-back may follow a successful write: inspect the course/roster and any returned ID before further action. Never blindly retry or delete a possible success. Any cleanup requires separate review and authorization. See the [design and permission notes](docs/2026-10-23-course-provisioning-extension.md).
+
 ### Deactivating one student enrollment
 
-First confirm the official enrollment disposition outside Canvas. Use `canvas_preview_student_deactivation` with the course ID, section ID, enrollment ID, Canvas user ID, and SIS user ID. It shows the live state and makes no change. The mutation accepts the same exact IDs plus `APPROVE CANVAS STUDENT DEACTIVATION course <course_id> enrollment <enrollment_id>` after human authorization and MCP-client approval. The local policy must be version 3 and the course must appear in `approved_student_deactivation_course_ids`; version 1 and 2 policies remain readable but grant no deactivation access. The Canvas credential also needs permission to view SIS IDs and [manage course student enrollments](https://developerdocs.instructure.com/services/canvas/permissions/details/file.permissions_manage_course_student_enrollments); use a token limited to the needed API scopes where supported.
+First confirm the official enrollment disposition outside Canvas. Use `canvas_preview_student_deactivation` with the course ID, section ID, enrollment ID, Canvas user ID, and SIS user ID. It shows the live state and makes no change. The mutation accepts the same exact IDs plus `APPROVE CANVAS STUDENT DEACTIVATION course <course_id> enrollment <enrollment_id>` after human authorization and MCP-client approval. The local policy must be version 3 or 4 and the course must appear in `approved_student_deactivation_course_ids`; version 1 and 2 policies remain readable but grant no deactivation access. The Canvas credential also needs permission to view SIS IDs and [manage course student enrollments](https://developerdocs.instructure.com/services/canvas/permissions/details/file.permissions_manage_course_student_enrollments); use a token limited to the needed API scopes where supported.
 
 The tool refuses a mismatched identity or a non-active enrollment, sends only Canvas's `task=deactivate` action to the exact enrollment, and confirms the resulting inactive state through a second read. An already inactive enrollment returns a verified no-change result. If verification fails after the request, inspect the Canvas roster before retrying. Canvas's [Enrollments API](https://developerdocs.instructure.com/services/canvas/resources/enrollments) documents deactivation as distinct from deletion; restoring access requires a separately authorized reactivation action, which this connector does not provide.
 
@@ -181,7 +206,7 @@ Canvas uses a documented three-step upload exchange: initialize the course file 
 
 ## Current authoring boundary
 
-This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its only local-file capability is the payload-gated image uploader described above. One guarded student-deactivation action is supported. Generic file upload, New Quizzes, other enrollment changes, cross-listing, provisioning, and broader account/course administration remain unsupported.
+This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its only local-file capability is the payload-gated image uploader described above. Guarded student deactivation, blank-shell creation, and instructor invitations are supported. Generic file upload, New Quizzes, other enrollment changes, cross-listing, template copying, and broader account/course administration remain unsupported.
 
 See [`docs/2026-08-06-content-authoring-extension.md`](docs/2026-08-06-content-authoring-extension.md) for the implementation and end-to-end validation record.
 See [`docs/2026-08-16-image-upload-extension.md`](docs/2026-08-16-image-upload-extension.md) for the image-upload threat model and validation record.
