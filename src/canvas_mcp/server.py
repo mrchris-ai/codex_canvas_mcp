@@ -27,7 +27,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.13.0"
+SERVER_VERSION = "0.14.0"
 PROTOCOL_VERSION = "2025-03-26"
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 IMAGE_CONTENT_TYPES = {
@@ -187,7 +187,7 @@ def api_get(path: str, query: dict[str, Any] | None = None) -> Any:
 
 def disabled_policy() -> dict[str, Any]:
     return {
-        "version": 4,
+        "version": 5,
         "enabled": False,
         "approved_course_ids": [],
         "approved_rubric_delete_course_ids": [],
@@ -195,6 +195,8 @@ def disabled_policy() -> dict[str, Any]:
         "approved_course_creation_account_ids": [],
         "approved_instructor_enrollment_course_ids": [],
         "approved_instructor_role_ids": [],
+        "approved_course_creation_targets": [],
+        "approved_instructor_enrollment_targets": [],
     }
 
 
@@ -219,17 +221,19 @@ def write_policy() -> dict[str, Any]:
         raise ConfigurationError("The Canvas write policy must be a JSON object.")
     version = policy.get("version")
     expected_keys = {"version", "enabled", "approved_course_ids"}
-    if version in {2, 3, 4}:
+    if version in {2, 3, 4, 5}:
         expected_keys.add("approved_rubric_delete_course_ids")
-    if version in {3, 4}:
+    if version in {3, 4, 5}:
         expected_keys.add("approved_student_deactivation_course_ids")
     provision_keys = ("approved_course_creation_account_ids",
                       "approved_instructor_enrollment_course_ids", "approved_instructor_role_ids")
-    if version == 4:
+    if version in {4, 5}:
         expected_keys.update(provision_keys)
+    if version == 5:
+        expected_keys.update(("approved_course_creation_targets", "approved_instructor_enrollment_targets"))
     if set(policy) != expected_keys:
         raise ConfigurationError("The Canvas write policy contains unexpected keys.")
-    if type(version) is not int or version not in {1, 2, 3, 4} or not isinstance(policy["enabled"], bool):
+    if type(version) is not int or version not in {1, 2, 3, 4, 5} or not isinstance(policy["enabled"], bool):
         raise ConfigurationError("The Canvas write policy has invalid version or enabled values.")
     course_ids = policy["approved_course_ids"]
     if not isinstance(course_ids, list) or any(
@@ -270,9 +274,26 @@ def write_policy() -> dict[str, Any]:
         if len(values) != len(set(values)):
             raise ConfigurationError(f"{key} must not contain duplicates.")
         provision_policy[key] = values
+    for kind, key in (("course", "approved_course_creation_targets"),
+                      ("instructor", "approved_instructor_enrollment_targets")):
+        values = policy.get(key, [])
+        if not isinstance(values, list):
+            raise ConfigurationError(f"{key} must be a list of exact targets.")
+        validated = []
+        for value in values:
+            try:
+                if not isinstance(value, dict):
+                    raise ValueError("Target must be an object.")
+                target = provisioning_target(value, kind, False)
+            except (ValueError, TypeError) as exc:
+                raise ConfigurationError(f"{key} contains an invalid exact target.") from exc
+            if target in validated:
+                raise ConfigurationError(f"{key} must not contain duplicates.")
+            validated.append(target)
+        provision_policy[key] = validated
     return {
         **provision_policy,
-        "version": 4,
+        "version": 5,
         "enabled": policy["enabled"],
         "approved_course_ids": course_ids,
         "approved_rubric_delete_course_ids": rubric_delete_course_ids,
@@ -1470,12 +1491,14 @@ def provisioning_confirmation(kind: str, target: dict[str, Any]) -> str:
 
 def provisioning_approval(kind: str, target: dict[str, Any], confirmation: Any) -> None:
     policy = write_policy()
-    checks = (("approved_course_creation_account_ids", "account_id"),) if kind == "course" else (
-        ("approved_instructor_enrollment_course_ids", "course_id"),
-        ("approved_instructor_role_ids", "role_id"),
-    )
-    if not policy["enabled"] or any(target[field] not in policy.get(key, []) for key, field in checks):
-        raise PermissionError("Provisioning is disabled or the exact target/role is not locally approved.")
+    key = "approved_course_creation_targets" if kind == "course" else "approved_instructor_enrollment_targets"
+    # Legacy account/course lists remain readable, but never grant provisioning.
+    # The entire reviewed target must match; a freshly generated confirmation
+    # cannot authorize a different name, term, instructor, section, or role.
+    if not policy["enabled"] or target not in policy.get(key, []):
+        raise PermissionError("Provisioning requires an approved exact target in a version 5 local policy.")
+    if kind == "instructor" and target["role_id"] not in policy.get("approved_instructor_role_ids", []):
+        raise PermissionError("The exact instructor role is not independently approved.")
     expected = provisioning_confirmation(kind, target)
     if confirmation != expected:
         raise PermissionError(f"Confirmation must exactly match the preview: {expected}")
@@ -1672,7 +1695,7 @@ TOOLS: list[dict[str, Any]] = [
             "idempotentHint": False,
             "readOnlyHint": False
         },
-        "description": "Create and verify one private unpublished blank course shell. Requires exact subaccount policy approval, the preview confirmation, human authorization and MCP-client approval. Skips templates and self-enrollment. Never retries an uncertain write.",
+        "description": "Create and verify one private unpublished blank course shell. Requires exact name/code/subaccount/term policy approval, the preview confirmation, human authorization and MCP-client approval. Skips templates and self-enrollment. Never retries an uncertain write.",
         "inputSchema": {
             "additionalProperties": False,
             "properties": {
@@ -1762,7 +1785,7 @@ TOOLS: list[dict[str, Any]] = [
             "idempotentHint": False,
             "readOnlyHint": False
         },
-        "description": "Invite and verify one instructor with an approved TeacherEnrollment role, such as DSTeacher. Requires separate exact-course and role allowlists, preview confirmation, human authorization and MCP-client approval. Notifies via Canvas. Does not reactivate or change roles.",
+        "description": "Invite and verify one instructor with an approved TeacherEnrollment role, such as DSTeacher. Requires the full exact enrollment target and independent role approval, preview confirmation, human authorization and MCP-client approval. Notifies via Canvas. Does not reactivate or change roles.",
         "inputSchema": {
             "additionalProperties": False,
             "properties": {
