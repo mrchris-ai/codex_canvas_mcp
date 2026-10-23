@@ -27,7 +27,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.11.0"
+SERVER_VERSION = "0.12.0"
 PROTOCOL_VERSION = "2025-03-26"
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 IMAGE_CONTENT_TYPES = {
@@ -187,10 +187,11 @@ def api_get(path: str, query: dict[str, Any] | None = None) -> Any:
 
 def disabled_policy() -> dict[str, Any]:
     return {
-        "version": 2,
+        "version": 3,
         "enabled": False,
         "approved_course_ids": [],
         "approved_rubric_delete_course_ids": [],
+        "approved_student_deactivation_course_ids": [],
     }
 
 
@@ -215,11 +216,13 @@ def write_policy() -> dict[str, Any]:
         raise ConfigurationError("The Canvas write policy must be a JSON object.")
     version = policy.get("version")
     expected_keys = {"version", "enabled", "approved_course_ids"}
-    if version == 2:
+    if version in {2, 3}:
         expected_keys.add("approved_rubric_delete_course_ids")
+    if version == 3:
+        expected_keys.add("approved_student_deactivation_course_ids")
     if set(policy) != expected_keys:
         raise ConfigurationError("The Canvas write policy contains unexpected keys.")
-    if version not in {1, 2} or not isinstance(policy["enabled"], bool):
+    if version not in {1, 2, 3} or not isinstance(policy["enabled"], bool):
         raise ConfigurationError("The Canvas write policy has invalid version or enabled values.")
     course_ids = policy["approved_course_ids"]
     if not isinstance(course_ids, list) or any(
@@ -240,11 +243,24 @@ def write_policy() -> dict[str, Any]:
         raise ConfigurationError(
             "approved_rubric_delete_course_ids must not contain duplicates."
         )
+    student_deactivation_course_ids = policy.get("approved_student_deactivation_course_ids", [])
+    if not isinstance(student_deactivation_course_ids, list) or any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        for value in student_deactivation_course_ids
+    ):
+        raise ConfigurationError(
+            "approved_student_deactivation_course_ids must contain only positive integers."
+        )
+    if len(student_deactivation_course_ids) != len(set(student_deactivation_course_ids)):
+        raise ConfigurationError(
+            "approved_student_deactivation_course_ids must not contain duplicates."
+        )
     return {
-        "version": 2,
+        "version": 3,
         "enabled": policy["enabled"],
         "approved_course_ids": course_ids,
         "approved_rubric_delete_course_ids": rubric_delete_course_ids,
+        "approved_student_deactivation_course_ids": student_deactivation_course_ids,
     }
 
 
@@ -345,6 +361,26 @@ def require_rubric_delete_approval(
             "operation-specific local policy."
         )
     expected = f"APPROVE CANVAS RUBRIC DELETE course {course_id} rubric {rubric_id}"
+    if confirmation != expected:
+        raise PermissionError(f"Confirmation must exactly match: {expected}")
+
+
+def require_student_deactivation_approval(
+    course_id: int, enrollment_id: int, confirmation: Any
+) -> None:
+    policy = write_policy()
+    if (
+        not policy["enabled"]
+        or course_id not in policy.get("approved_student_deactivation_course_ids", [])
+    ):
+        raise PermissionError(
+            "Student enrollment deactivation is disabled or this course is not approved "
+            "by the operation-specific local policy."
+        )
+    expected = (
+        f"APPROVE CANVAS STUDENT DEACTIVATION course {course_id} "
+        f"enrollment {enrollment_id}"
+    )
     if confirmation != expected:
         raise PermissionError(f"Confirmation must exactly match: {expected}")
 
@@ -1285,6 +1321,104 @@ def update_syllabus(args: dict[str, Any]) -> dict[str, Any]:
     return {**result, "verified": True}
 
 
+def student_deactivation_target(args: dict[str, Any], *, apply: bool) -> tuple[int, int, int, int, str]:
+    required = {"course_id", "enrollment_id", "canvas_user_id", "section_id", "sis_user_id"}
+    allowed = required | ({"confirmation"} if apply else set())
+    if set(args) != allowed:
+        raise ValueError("Student deactivation requires only the exact target fields.")
+    course_id = require_course_id(args["course_id"])
+    enrollment_id = require_positive_id(args["enrollment_id"], "enrollment_id")
+    canvas_user_id = require_positive_id(args["canvas_user_id"], "canvas_user_id")
+    section_id = require_positive_id(args["section_id"], "section_id")
+    sis_user_id = require_text(args["sis_user_id"], "sis_user_id")
+    if sis_user_id != sis_user_id.strip():
+        raise ValueError("sis_user_id must not have leading or trailing spaces.")
+    return course_id, enrollment_id, canvas_user_id, section_id, sis_user_id
+
+
+def read_exact_student_enrollment(
+    course_id: int, enrollment_id: int, canvas_user_id: int, section_id: int, sis_user_id: str
+) -> dict[str, Any]:
+    records = api_get(
+        f"/api/v1/courses/{course_id}/enrollments",
+        {
+            "user_id": canvas_user_id,
+            "state[]": ["active", "invited", "inactive"],
+            "per_page": 100,
+        },
+    )
+    if not isinstance(records, list) or len(records) >= 100:
+        raise RuntimeError("Canvas returned an invalid or incomplete enrollment list.")
+    matches = [record for record in records if isinstance(record, dict) and record.get("id") == enrollment_id]
+    if len(matches) != 1:
+        raise ValueError("The exact enrollment was not found in this course for this user.")
+    record = matches[0]
+    expected = {
+        "course_id": course_id,
+        "course_section_id": section_id,
+        "user_id": canvas_user_id,
+        "sis_user_id": sis_user_id,
+        "type": "StudentEnrollment",
+    }
+    if any(record.get(key) != value for key, value in expected.items()):
+        raise ValueError("The enrollment identity, course, section, or student role does not match.")
+    if record.get("enrollment_state") not in {"active", "invited", "inactive"}:
+        raise ValueError("The enrollment has an unsupported state.")
+    return record
+
+
+def preview_student_deactivation(args: dict[str, Any]) -> dict[str, Any]:
+    course_id, enrollment_id, canvas_user_id, section_id, sis_user_id = student_deactivation_target(
+        args, apply=False
+    )
+    record = read_exact_student_enrollment(
+        course_id, enrollment_id, canvas_user_id, section_id, sis_user_id
+    )
+    return {
+        "course_id": course_id,
+        "section_id": section_id,
+        "enrollment_id": enrollment_id,
+        "canvas_user_id": canvas_user_id,
+        "sis_user_id": sis_user_id,
+        "current_state": record["enrollment_state"],
+        "can_deactivate": record["enrollment_state"] == "active",
+        "effect": "Student remains in the course roster but cannot participate while inactive.",
+    }
+
+
+def deactivate_student_enrollment(args: dict[str, Any]) -> dict[str, Any]:
+    course_id, enrollment_id, canvas_user_id, section_id, sis_user_id = student_deactivation_target(
+        args, apply=True
+    )
+    require_student_deactivation_approval(course_id, enrollment_id, args["confirmation"])
+    before = read_exact_student_enrollment(
+        course_id, enrollment_id, canvas_user_id, section_id, sis_user_id
+    )
+    if before["enrollment_state"] == "inactive":
+        return {"changed": False, "verified": True, "enrollment_state": "inactive", "enrollment_id": enrollment_id}
+    if before["enrollment_state"] != "active":
+        raise ValueError("Only an active student enrollment may be deactivated.")
+    request_api(
+        "DELETE",
+        f"/api/v1/courses/{course_id}/enrollments/{enrollment_id}",
+        query={"task": "deactivate"},
+    )
+    try:
+        after = read_exact_student_enrollment(
+            course_id, enrollment_id, canvas_user_id, section_id, sis_user_id
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Canvas may have changed the enrollment, but read-back verification failed. "
+            "Inspect the roster before retrying."
+        ) from exc
+    if after["enrollment_state"] != "inactive":
+        raise RuntimeError(
+            "Canvas did not verify an inactive enrollment. Inspect the roster before retrying."
+        )
+    return {"changed": True, "verified": True, "enrollment_state": "inactive", "enrollment_id": enrollment_id}
+
+
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "canvas_update_syllabus",
@@ -1357,6 +1491,49 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Show write-policy state and approved course IDs. Does not expose credentials.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": {"readOnlyHint": True},
+    },
+    {
+        "name": "canvas_preview_student_deactivation",
+        "description": (
+            "Read one exact student enrollment and show its current state and the effect of "
+            "deactivation. Requires matching course, section, enrollment, Canvas user, and SIS user IDs. "
+            "Does not change Canvas."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "course_id": {"type": "integer", "minimum": 1},
+                "section_id": {"type": "integer", "minimum": 1},
+                "enrollment_id": {"type": "integer", "minimum": 1},
+                "canvas_user_id": {"type": "integer", "minimum": 1},
+                "sis_user_id": {"type": "string", "minLength": 1, "maxLength": 255},
+            },
+            "required": ["course_id", "section_id", "enrollment_id", "canvas_user_id", "sis_user_id"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": True},
+    },
+    {
+        "name": "canvas_deactivate_student_enrollment",
+        "description": (
+            "Deactivate exactly one active StudentEnrollment without deleting it. Requires a separate "
+            "per-course deactivation allowlist, exact enrollment confirmation, matching student and "
+            "section IDs, and MCP-client approval. Reads the enrollment back before reporting success."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "course_id": {"type": "integer", "minimum": 1},
+                "section_id": {"type": "integer", "minimum": 1},
+                "enrollment_id": {"type": "integer", "minimum": 1},
+                "canvas_user_id": {"type": "integer", "minimum": 1},
+                "sis_user_id": {"type": "string", "minLength": 1, "maxLength": 255},
+                "confirmation": {"type": "string"},
+            },
+            "required": ["course_id", "section_id", "enrollment_id", "canvas_user_id", "sis_user_id", "confirmation"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True},
     },
     {
         "name": "canvas_upload_image",
@@ -1732,6 +1909,10 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return inspect_course_rubric(course_id, rubric_id)
     if name == "canvas_get_write_policy":
         return write_policy()
+    if name == "canvas_preview_student_deactivation":
+        return preview_student_deactivation(args)
+    if name == "canvas_deactivate_student_enrollment":
+        return deactivate_student_enrollment(args)
     if name == "canvas_upload_image":
         return upload_canvas_image(args)
     if name == "canvas_write_page":
