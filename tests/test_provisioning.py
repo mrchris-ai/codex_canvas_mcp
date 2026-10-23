@@ -100,6 +100,54 @@ class ProvisioningTests(unittest.TestCase):
             "user_id": 50, "type": "TeacherEnrollment", "role_id": 60, "course_section_id": 40,
             "enrollment_state": "invited", "limit_privileges_to_course_section": False, "notify": True}})
 
+    def default_section_reads(self, path, query=None):
+        if path == "/api/v1/courses/30/sections":
+            return [self.section] if self.created and query["page"] == 1 else []
+        return self.fake_read(path, query)
+
+    def test_empty_shell_default_section_invitation_and_readback(self):
+        self.instructor_target["section_id"] = 0
+        self.read.side_effect = self.default_section_reads
+        preview = server.preview_instructor_enrollment(self.instructor_target)
+        self.assertIn("default section", preview["effect"])
+        self.write.assert_not_called()
+        result = self.apply("instructor")
+        self.assertEqual(result["section_id"], 40)
+        self.assertTrue(result["verified"])
+        self.assertNotIn("course_section_id", self.write.call_args.kwargs["data"]["enrollment"])
+        # Once Canvas creates a section, zero cannot authorize another invitation.
+        self.write.reset_mock()
+        with self.assertRaises(ValueError): self.apply("instructor")
+        self.write.assert_not_called()
+
+    def test_default_section_rejects_existing_sections_enrollments_and_unsafe_courses(self):
+        self.instructor_target["section_id"] = 0
+        self.read.side_effect = self.default_section_reads
+        for key, value in (("workflow_state", "available"), ("is_public", True),
+                           ("sis_course_id", "official"), ("blueprint", True), ("template", True)):
+            old = self.course.get(key)
+            self.course[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError): self.apply("instructor")
+            self.course[key] = old
+        self.records = [self.enrollment]
+        with self.assertRaises(ValueError): self.apply("instructor")
+        self.write.assert_not_called()
+
+    def test_default_section_bad_readback_is_uncertain_without_retry(self):
+        self.instructor_target["section_id"] = 0
+        for bad in ([], [dict(id=40, course_id=31)], [self.section, dict(id=41, course_id=30)],
+                    [{**self.section, "sis_section_id": "official"}]):
+            self.created = False
+            self.write.reset_mock()
+            def read(path, query=None):
+                if path == "/api/v1/courses/30/sections":
+                    return bad if self.created and query["page"] == 1 else []
+                return self.fake_read(path, query)
+            self.read.side_effect = read
+            with self.subTest(bad=bad), self.assertRaisesRegex(RuntimeError, "Do not automatically retry"):
+                self.apply("instructor")
+            self.assertEqual(self.write.call_count, 1)
+
     def test_missing_separate_policy_and_confirmation_block_all_network(self):
         for kind, key in (("course", "approved_course_creation_targets"),
                           ("instructor", "approved_instructor_enrollment_targets"),
@@ -275,7 +323,7 @@ class ProvisioningPolicyTests(unittest.TestCase):
                     for field, value in target.items():
                         bad_values.extend([[{k: v for k, v in target.items() if k != field}],
                                            [{**target, field: True if type(value) is int else " bad"}],
-                                           [{**target, field: 0 if type(value) is int else "bad\nvalue"}]])
+                                           [{**target, field: -1 if type(value) is int else "bad\nvalue"}]])
                     for bad in bad_values:
                         path.write_text(json.dumps({**policy, key: bad}))
                         with self.subTest(key=key, bad=bad), self.assertRaises(server.ConfigurationError):
