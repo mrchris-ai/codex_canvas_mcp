@@ -1,10 +1,12 @@
 {
-  "version": 4,
+  "version": 5,
   "enabled": false,
   "approved_course_ids": [],
   "approved_rubric_delete_course_ids": [],
   "approved_student_deactivation_course_ids": [],
   "approved_course_creation_account_ids": [],
   "approved_instructor_enrollment_course_ids": [],
-  "approved_instructor_role_ids": []
+  "approved_instructor_role_ids": [],
+  "approved_course_creation_targets": [],
+  "approved_instructor_enrollment_targets": []
 }

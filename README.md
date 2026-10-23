@@ -159,28 +159,26 @@ If the variable is absent, the file is missing, permissions are broader than `06
 
 ### Creating a shell and inviting an instructor
 
-Version 0.13.0 adds four provisioning tools. Install the updated package and restart the MCP client to load them. Upgrade the private policy to version 4, retaining its existing lists and adding these independent lists (all empty by default):
+Version 0.14.0 uses **policy version 5** for exact provisioning approvals. Install the updated package and restart the MCP client once. Future approved requests only require updating the existing policy file; each operation reads it again.
 
-| Policy key | Exact approval scope |
-| --- | --- |
-| `approved_course_creation_account_ids` | Development subaccounts where blank shells may be created |
-| `approved_instructor_enrollment_course_ids` | Courses where an instructor invitation is allowed |
-| `approved_instructor_role_ids` | Active custom roles based on TeacherEnrollment, such as DSTeacher |
+Course creation requires an entry in `approved_course_creation_targets` containing all four exact fields: `account_id`, `enrollment_term_id`, `name`, and `course_code`. Instructor invitations require an entry in `approved_instructor_enrollment_targets` containing all six fields: `course_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `role_id`, and `role_name`. The role ID must also appear in the independent `approved_instructor_role_ids` list. Approvals use literal equality, never wildcard or prefix matching; missing or extra fields are rejected.
 
-Version 1–3 policies remain readable and grant no provisioning access. Never copy real IDs or an enabled policy into source control. Approving a subaccount does not approve instructor enrollment or content writes in its courses.
+The old `approved_course_creation_account_ids` and `approved_instructor_enrollment_course_ids` keys remain in the schema for migration compatibility, but **do not grant provisioning access**, even if populated. Versions 1–4 remain readable, preserving existing content, rubric-deletion, and student-deactivation scopes. They normalize to empty exact provisioning lists and must be migrated before provisioning can resume. Never copy real IDs or an enabled policy into source control.
 
-1. After human authorization, resolve the exact subaccount and term through Canvas reads. Call `canvas_preview_course_creation` with `account_id`, `enrollment_term_id`, `name`, and `course_code`. Names and codes must each have at least three characters.
-2. Review the returned account, term, requested fields, and effect. Call `canvas_create_course_shell` with the same fields and the preview's `confirmation`. The hash binds all requested fields; the agent supplies it after human authorization. Client approval and private local policy are still required.
-3. The tool creates one private, unpublished blank shell, skips account template copying and self-enrollment, and returns a verified course link. It refuses a matching existing name or code in the exact account. It does not publish the course or set a SIS course identifier.
-4. Add the returned course ID to `approved_instructor_enrollment_course_ids` and the approved custom teacher role ID to `approved_instructor_role_ids`. Resolve the existing user's Canvas and SIS IDs and the course section. Verify the institution's intended instructor identity.
-5. Call `canvas_preview_instructor_enrollment` with `course_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `role_id`, and `role_name`. Then use those same fields plus its confirmation in `canvas_enroll_instructor`. The role must be active, available in this account, and based on TeacherEnrollment. The invitation requests Canvas notification and grants course-wide instructor access. It does not create a user. An identical active/invited enrollment is a no-op; conflicting roles, sections, states, or restricted access are refused.
-6. Verify the returned enrollment state and course link. Canvas notification is requested, but delivery is not independently confirmed. Disable temporary policy scopes afterward.
+### Recurring request procedure
 
-Provisioning does not provide automatic rollback or server-side idempotency. Serialize requests for the same target. A timeout or failed read-back may follow a successful write: inspect the course/roster and any returned ID before further action. Never blindly retry or delete a possible success. Any cleanup requires separate review and authorization. See the [design and permission notes](docs/2026-10-23-course-provisioning-extension.md).
+1. Review the request, identify the instructor and campus, establish exact names/codes, and obtain human authorization. Preview is not authorization.
+2. Upgrade the private policy to version 5, preserving existing settings, adding both exact-target lists, and retaining file mode `0600`. Add only the reviewed course targets. Keep legacy account/course provisioning lists empty.
+3. Call `canvas_preview_course_creation` for each target. Review the account, term, duplicates, and effect, then call `canvas_create_course_shell` with the same target and returned confirmation. Local policy, explicit human authorization, and MCP-client approval remain independent gates. Create one shell at a time and verify its returned ID/link.
+4. Read the created course's sections. Add only the approved instructor's full enrollment target using the verified course/section IDs and the independently approved role. Course approval never grants enrollment approval automatically.
+5. Call `canvas_preview_instructor_enrollment`, then `canvas_enroll_instructor` with that exact target and its returned confirmation. The instructor is invited and Canvas notification is requested; delivery is not independently confirmed.
+6. Verify the enrollment and course link. Remove completed exact targets from the policy when closing the request. The version 5 schema stays installed for subsequent requests; no broad subaccount enablement is needed.
+
+A changed name, code, term, campus, instructor, section, or role requires its own reviewed exact target. Fresh confirmation text cannot expand policy scope. An uncertain write must be inspected before any retry; never automatically retry or delete its result.
 
 ### Deactivating one student enrollment
 
-First confirm the official enrollment disposition outside Canvas. Use `canvas_preview_student_deactivation` with the course ID, section ID, enrollment ID, Canvas user ID, and SIS user ID. It shows the live state and makes no change. The mutation accepts the same exact IDs plus `APPROVE CANVAS STUDENT DEACTIVATION course <course_id> enrollment <enrollment_id>` after human authorization and MCP-client approval. The local policy must be version 3 or 4 and the course must appear in `approved_student_deactivation_course_ids`; version 1 and 2 policies remain readable but grant no deactivation access. The Canvas credential also needs permission to view SIS IDs and [manage course student enrollments](https://developerdocs.instructure.com/services/canvas/permissions/details/file.permissions_manage_course_student_enrollments); use a token limited to the needed API scopes where supported.
+First confirm the official enrollment disposition outside Canvas. Use `canvas_preview_student_deactivation` with the course ID, section ID, enrollment ID, Canvas user ID, and SIS user ID. It shows the live state and makes no change. The mutation accepts the same exact IDs plus `APPROVE CANVAS STUDENT DEACTIVATION course <course_id> enrollment <enrollment_id>` after human authorization and MCP-client approval. The local policy must be version 3, 4, or 5 and the course must appear in `approved_student_deactivation_course_ids`; version 1 and 2 policies remain readable but grant no deactivation access. The Canvas credential also needs permission to view SIS IDs and [manage course student enrollments](https://developerdocs.instructure.com/services/canvas/permissions/details/file.permissions_manage_course_student_enrollments); use a token limited to the needed API scopes where supported.
 
 The tool refuses a mismatched identity or a non-active enrollment, sends only Canvas's `task=deactivate` action to the exact enrollment, and confirms the resulting inactive state through a second read. An already inactive enrollment returns a verified no-change result. If verification fails after the request, inspect the Canvas roster before retrying. Canvas's [Enrollments API](https://developerdocs.instructure.com/services/canvas/resources/enrollments) documents deactivation as distinct from deletion; restoring access requires a separately authorized reactivation action, which this connector does not provide.
 
@@ -203,6 +201,7 @@ To restore a saved syllabus, review the live version, compute its current hash, 
 Image upload uses the same local write policy and exact course allowlist, plus `CANVAS_IMAGE_UPLOAD_ROOT`. The tool refuses relative paths, symlinks, files outside that root, files not owned by the current user, unsupported image types, files whose binary signature disagrees with the extension, and files larger than 10 MiB. The exact confirmation is `APPROVE CANVAS IMAGE UPLOAD course <course_id>`.
 
 Canvas uses a documented three-step upload exchange: initialize the course file through the authenticated API, send the image without the Canvas access token to Canvas's returned HTTPS storage URL, and authenticate the returned same-origin Canvas completion location. The tool then reads `/api/v1/courses/<course_id>/files/<file_id>` and checks the MIME type and size before returning a persistent course preview path. It never returns storage signatures or the file-download verifier URL.
+
 
 ## Current authoring boundary
 

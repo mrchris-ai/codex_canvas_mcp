@@ -30,8 +30,10 @@ class ProvisioningTests(unittest.TestCase):
         self.records = []
         self.created = False
         self.policy = {**server.disabled_policy(), "enabled": True,
-                       "approved_course_creation_account_ids": [10],
-                       "approved_instructor_enrollment_course_ids": [30], "approved_instructor_role_ids": [60]}
+                       "approved_course_creation_targets": [self.course_target],
+                       "approved_instructor_enrollment_targets": [self.instructor_target],
+                       "approved_course_creation_account_ids": [],
+                       "approved_instructor_enrollment_course_ids": [], "approved_instructor_role_ids": [60]}
         self.read = mock.patch.object(server, "api_get", side_effect=self.fake_read).start()
         self.write = mock.patch.object(server, "request_api", side_effect=self.fake_write).start()
         mock.patch.object(server, "write_policy", return_value=self.policy).start()
@@ -99,8 +101,8 @@ class ProvisioningTests(unittest.TestCase):
             "enrollment_state": "invited", "limit_privileges_to_course_section": False, "notify": True}})
 
     def test_missing_separate_policy_and_confirmation_block_all_network(self):
-        for kind, key in (("course", "approved_course_creation_account_ids"),
-                          ("instructor", "approved_instructor_enrollment_course_ids"),
+        for kind, key in (("course", "approved_course_creation_targets"),
+                          ("instructor", "approved_instructor_enrollment_targets"),
                           ("instructor", "approved_instructor_role_ids")):
             with self.subTest(kind=kind, key=key):
                 saved = self.policy[key]
@@ -114,6 +116,24 @@ class ProvisioningTests(unittest.TestCase):
             self.policy["enabled"] = False
             with self.assertRaises(PermissionError): self.apply(kind)
             self.policy["enabled"] = True
+        self.read.assert_not_called()
+        self.write.assert_not_called()
+
+    def test_exact_approval_rejects_every_changed_field_before_network(self):
+        for kind, target in (("course", self.course_target), ("instructor", self.instructor_target)):
+            for key, value in target.items():
+                changed = {**target, key: value + 1 if type(value) is int else value + "x"}
+                confirmation = server.provisioning_confirmation(kind, changed)
+                with self.subTest(kind=kind, key=key), self.assertRaises(PermissionError):
+                    self.apply(kind, **changed, confirmation=confirmation)
+        self.read.assert_not_called()
+        self.write.assert_not_called()
+
+    def test_legacy_broad_lists_never_authorize_provisioning(self):
+        self.policy.update(approved_course_creation_targets=[], approved_instructor_enrollment_targets=[],
+                           approved_course_creation_account_ids=[10], approved_instructor_enrollment_course_ids=[30])
+        for kind in ("course", "instructor"):
+            with self.assertRaises(PermissionError): self.apply(kind)
         self.read.assert_not_called()
         self.write.assert_not_called()
 
@@ -216,15 +236,17 @@ class ProvisioningPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/"policy.json"; path.touch(); path.chmod(0o600)
             with mock.patch.dict(os.environ,{"CANVAS_WRITE_POLICY":str(path)}):
-                for version in (1,2,3,4):
+                for version in (1,2,3,4,5):
                     policy={"version":version,"enabled":True,"approved_course_ids":[123]}
                     if version>=2: policy["approved_rubric_delete_course_ids"]=[]
                     if version>=3: policy["approved_student_deactivation_course_ids"]=[]
-                    if version==4: policy.update({key:[123] for key in keys})
+                    if version>=4: policy.update({key:[123] for key in keys})
+                    if version==5:
+                        policy.update(approved_course_creation_targets=[], approved_instructor_enrollment_targets=[])
                     path.write_text(json.dumps(policy))
                     result=server.write_policy()
-                    self.assertEqual(result["version"],4)
-                    for key in keys: self.assertEqual(result[key],[123] if version==4 else [])
+                    self.assertEqual(result["version"],5)
+                    for key in keys: self.assertEqual(result[key],[123] if version>=4 else [])
                 for key in keys:
                     for bad in ([True],[0],[-1],[1,1],"1",None):
                         path.write_text(json.dumps({**policy,key:bad}))
@@ -232,6 +254,33 @@ class ProvisioningPolicyTests(unittest.TestCase):
                 for extra in ({"version":True},{"surprise":[]}, {"enabled":"yes"}):
                     path.write_text(json.dumps({**policy,**extra}))
                     with self.assertRaises(server.ConfigurationError):server.write_policy()
+
+    def test_exact_target_schema_and_preservation(self):
+        targets = {
+            "approved_course_creation_targets": dict(account_id=10, enrollment_term_id=20, name="DS Sample", course_code="DS_SAMPLE"),
+            "approved_instructor_enrollment_targets": dict(course_id=30, section_id=40, canvas_user_id=50,
+                                                          sis_user_id="0000000050", role_id=60, role_name="DSTeacher"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            path.touch(mode=0o600)
+            with mock.patch.dict(os.environ, {"CANVAS_WRITE_POLICY": str(path)}), \
+                 mock.patch.object(server, "request_api") as network:
+                policy = {**server.disabled_policy(), "enabled": True, "approved_course_ids": [123],
+                          **{key: [target] for key, target in targets.items()}}
+                path.write_text(json.dumps(policy))
+                self.assertEqual(server.write_policy(), policy)
+                for key, target in targets.items():
+                    bad_values = [None, {}, "*", [None], [target, target], [{**target, "extra": 1}]]
+                    for field, value in target.items():
+                        bad_values.extend([[{k: v for k, v in target.items() if k != field}],
+                                           [{**target, field: True if type(value) is int else " bad"}],
+                                           [{**target, field: 0 if type(value) is int else "bad\nvalue"}]])
+                    for bad in bad_values:
+                        path.write_text(json.dumps({**policy, key: bad}))
+                        with self.subTest(key=key, bad=bad), self.assertRaises(server.ConfigurationError):
+                            server.write_policy()
+                network.assert_not_called()
 
 
 if __name__ == "__main__":
