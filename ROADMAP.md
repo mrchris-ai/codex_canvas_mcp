@@ -14,11 +14,11 @@ Each future feature needs its own narrow tool contract, least-privilege credenti
 - Generic document, archive, audio, video, and other local-file upload remain unsupported.
 - New Quizzes needs a reviewed tool contract; it is distinct from the Classic Quiz API.
 
-### Sandbox and course-shell provisioning
+### Extended course-shell provisioning
 
-- Create a sandbox or course shell from an approved account or subaccount.
-- Require an explicit institutional template and ownership assignment.
-- Prevent accidental creation in production subaccounts.
+- Blank private unpublished shells are implemented for exact approved subaccounts, with explicit term, duplicate checks, and read-back. Instructor ownership is assigned through the separately approved instructor-invitation tool.
+- Template copying, root-account creation, publication, SIS identifiers, and bulk provisioning remain deferred.
+- Local operators must approve only intended development subaccounts; the connector cannot infer institutional production/development classification.
 
 ### Cross-listing
 
@@ -30,7 +30,8 @@ Each future feature needs its own narrow tool contract, least-privilege credenti
 
 - One-student deactivation is implemented through a dedicated preview and guarded mutation. It does not remove an enrollment.
 - Resolve identities without exposing unnecessary profile data.
-- Design enrollment creation, reactivation, role changes, invitations, and removals as distinct actions.
+- One exact instructor invitation is implemented for an existing Canvas/SIS identity and an approved TeacherEnrollment role. Existing conflicts are refused.
+- Student enrollment creation, reactivation, role changes, removals, and broader invitations remain deferred.
 - Require role and course constraints in local policy.
 
 ### Maintenance
