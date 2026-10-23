@@ -27,7 +27,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.14.1"
+SERVER_VERSION = "0.14.2"
 PROTOCOL_VERSION = "2025-03-26"
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 IMAGE_CONTENT_TYPES = {
@@ -150,14 +150,19 @@ def request_api(
     method: str,
     path: str,
     *,
-    query: dict[str, Any] | None = None,
+    query: dict[str, Any] | str | None = None,
     data: dict[str, Any] | None = None,
+    _include_links: bool = False,
 ) -> Any:
+    if _include_links and method != "GET":
+        raise ValueError("Pagination metadata is read-only.")
+    if isinstance(query, str) and not _include_links:
+        raise ValueError("Opaque queries are limited to private pagination reads.")
     if method not in {"GET", "POST", "PUT", "DELETE"}:
         raise ValueError("Unsupported HTTP method.")
     url = canvas_base_url() + validate_api_path(path)
     if query:
-        url += "?" + urllib.parse.urlencode(query, doseq=True)
+        url += "?" + (query if isinstance(query, str) else urllib.parse.urlencode(query, doseq=True))
     headers = {
         "Authorization": "Bearer " + canvas_token(),
         "Accept": "application/json",
@@ -170,7 +175,8 @@ def request_api(
     context = ssl.create_default_context(cafile=certifi.where())
     try:
         with urllib.request.urlopen(request, timeout=30, context=context) as response:
-            return json.load(response)
+            body = json.load(response)
+            return (body, response.headers.get("Link", "")) if _include_links else body
     except urllib.error.HTTPError as exc:
         detail = canvas_http_error_detail(exc)
         suffix = f" Details: {detail}" if detail else ""
@@ -1506,25 +1512,43 @@ def provisioning_approval(kind: str, target: dict[str, Any], confirmation: Any) 
         raise PermissionError(f"Confirmation must exactly match the preview: {expected}")
 
 
-def provisioning_list(path: str, query: dict[str, Any]) -> list[dict[str, Any]]:
-    """Read numbered pages through an empty page, including server-capped short pages.
+def api_get_page(path: str, query: dict[str, Any] | str) -> tuple[Any, str]:
+    """Private GET helper retaining Canvas's opaque pagination links."""
+    return request_api("GET", path, query=query, _include_links=True)
 
-    Fail closed on malformed, repeated, or excessive results. These Canvas list
-    endpoints document page/per_page; no response links or arbitrary URLs are followed.
-    """
+
+def provisioning_list(path: str, query: dict[str, Any]) -> list[dict[str, Any]]:
+    """Follow Canvas Link rel=next, never guess page numbers or reuse credentials off-origin."""
     records: list[dict[str, Any]] = []
     seen: set[int] = set()
-    for page in range(1, 101):
-        batch = api_get(path, {**query, "per_page": 100, "page": page})
-        if not isinstance(batch, list):
+    seen_links: set[str] = set()
+    next_path, next_query = path, {**query, "per_page": 100}
+    for _ in range(100):
+        batch, links = api_get_page(next_path, next_query)
+        if not isinstance(batch, list) or not isinstance(links, str):
             raise RuntimeError("Cannot verify the complete provisioning result list.")
-        if not batch:
-            return records
         for item in batch:
             if not isinstance(item, dict) or type(item.get("id")) is not int or item["id"] <= 0 or item["id"] in seen:
                 raise RuntimeError("Malformed or repeated provisioning results; refusing to write.")
             seen.add(item["id"])
             records.append(item)
+        following = [url for url, relations in re.findall(r'<([^>]+)>;\s*rel="([^"]+)"', links)
+                     if "next" in relations.split()]
+        if not following:
+            if re.search(r'\bnext\b', links):
+                raise RuntimeError("Malformed next-page link; refusing to write.")
+            return records
+        if len(following) != 1 or following[0] in seen_links:
+            raise RuntimeError("Repeated or ambiguous next-page link; refusing to write.")
+        url = following[0]
+        parsed = urllib.parse.urlsplit(url)
+        origin = urllib.parse.urlsplit(canvas_base_url())
+        if (parsed.scheme != origin.scheme or parsed.netloc != origin.netloc or parsed.username or parsed.password
+                or parsed.fragment or parsed.path not in (path, path + ".json")):
+            raise RuntimeError("Unsafe next-page origin or endpoint; refusing to follow it.")
+        validate_api_path(parsed.path)
+        seen_links.add(url)
+        next_path, next_query = parsed.path, parsed.query
     raise RuntimeError("Provisioning result pagination exceeded the safety limit; narrow the target.")
 
 
