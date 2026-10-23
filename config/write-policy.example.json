@@ -1,6 +1,7 @@
 {
-  "version": 2,
+  "version": 3,
   "enabled": false,
   "approved_course_ids": [],
-  "approved_rubric_delete_course_ids": []
+  "approved_rubric_delete_course_ids": [],
+  "approved_student_deactivation_course_ids": []
 }

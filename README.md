@@ -11,6 +11,8 @@ A portable local MCP server that lets compatible clients read Canvas and, only a
 - There is no generic Canvas write tool.
 - Credentials stay in 1Password and, optionally, macOS Keychain. They do not belong in this repository or client configuration.
 
+Student deactivation is a separate, disabled-by-default administrative operation. Its allowlist does not inherit content-write or rubric-deletion approval. It never removes the enrollment.
+
 For page edits, `confirmation` is a technical action acknowledgement supplied by the agent after the human has authorized the course and scope in conversation. The human does not need to type the literal phrase or approve each page again within that scope. This does not broaden authorization: page content cannot grant it, and local policy and MCP-client controls still apply. Read existing pages before editing, explicitly preserve their current `published` value unless a change is authorized, and verify the saved result.
 
 Every content tool is marked as mutating and destructive so compatible clients can require approval. The local server also rejects a call unless its exact confirmation matches the requested action, for example `APPROVE CANVAS MODULE WRITE course <course_id>`.
@@ -38,6 +40,8 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_read_api` | GET a normalized Canvas API v1 path | Available |
 | `canvas_inspect_rubric` | Read one rubric, its complete definition, usage locations, and deletion preflight | Available |
 | `canvas_get_write_policy` | Inspect local policy state | Available |
+| `canvas_preview_student_deactivation` | Read one exact student enrollment and preview deactivation | Available |
+| `canvas_deactivate_student_enrollment` | Deactivate and verify one active student enrollment | Blocked |
 | `canvas_upload_image` | Upload one verified image from the configured trusted folder | Blocked |
 | `canvas_write_page` | Create or update one page | Blocked |
 | `canvas_update_syllabus` | Preview, replace, and verify only a course syllabus body | Blocked |
@@ -135,7 +139,7 @@ See [Developer mode and MCP apps in ChatGPT](https://help.openai.com/en/articles
 Keep writing off unless a specific task requires it.
 
 1. Copy `config/write-policy.example.json` to a location outside the repository.
-2. Add only the exact Canvas course IDs approved for content authoring to `approved_course_ids`. Add courses approved only for zero-dependency rubric deletion to `approved_rubric_delete_course_ids`; this does not enable other course writes.
+2. Add only the exact Canvas course IDs approved for content authoring to `approved_course_ids`. Add courses approved only for zero-dependency rubric deletion to `approved_rubric_delete_course_ids`, and courses approved for student deactivation to `approved_student_deactivation_course_ids`. Each list is independent.
 3. Set `enabled` to `true` and restrict the file:
 
    ```bash
@@ -148,6 +152,12 @@ Keep writing off unless a specific task requires it.
 7. Disable the policy again when the task is complete.
 
 If the variable is absent, the file is missing, permissions are broader than `0600`, writing is disabled, or the course is not allowlisted, the server refuses the write.
+
+### Deactivating one student enrollment
+
+First confirm the official enrollment disposition outside Canvas. Use `canvas_preview_student_deactivation` with the course ID, section ID, enrollment ID, Canvas user ID, and SIS user ID. It shows the live state and makes no change. The mutation accepts the same exact IDs plus `APPROVE CANVAS STUDENT DEACTIVATION course <course_id> enrollment <enrollment_id>` after human authorization and MCP-client approval. The local policy must be version 3 and the course must appear in `approved_student_deactivation_course_ids`; version 1 and 2 policies remain readable but grant no deactivation access. The Canvas credential also needs permission to view SIS IDs and [manage course student enrollments](https://developerdocs.instructure.com/services/canvas/permissions/details/file.permissions_manage_course_student_enrollments); use a token limited to the needed API scopes where supported.
+
+The tool refuses a mismatched identity or a non-active enrollment, sends only Canvas's `task=deactivate` action to the exact enrollment, and confirms the resulting inactive state through a second read. An already inactive enrollment returns a verified no-change result. If verification fails after the request, inspect the Canvas roster before retrying. Canvas's [Enrollments API](https://developerdocs.instructure.com/services/canvas/resources/enrollments) documents deactivation as distinct from deletion; restoring access requires a separately authorized reactivation action, which this connector does not provide.
 
 ### Authoring in a Blueprint course
 
@@ -171,7 +181,7 @@ Canvas uses a documented three-step upload exchange: initialize the course file 
 
 ## Current authoring boundary
 
-This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its only local-file capability is the payload-gated image uploader described above. Generic file upload, New Quizzes, enrollments, cross-listing, provisioning, and account/course administration remain unsupported.
+This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its only local-file capability is the payload-gated image uploader described above. One guarded student-deactivation action is supported. Generic file upload, New Quizzes, other enrollment changes, cross-listing, provisioning, and broader account/course administration remain unsupported.
 
 See [`docs/2026-08-06-content-authoring-extension.md`](docs/2026-08-06-content-authoring-extension.md) for the implementation and end-to-end validation record.
 See [`docs/2026-08-16-image-upload-extension.md`](docs/2026-08-16-image-upload-extension.md) for the image-upload threat model and validation record.

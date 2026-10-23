@@ -28,8 +28,9 @@ Each future feature needs its own narrow tool contract, least-privilege credenti
 
 ### User administration
 
+- One-student deactivation is implemented through a dedicated preview and guarded mutation. It does not remove an enrollment.
 - Resolve identities without exposing unnecessary profile data.
-- Separate enrollment, role changes, invitations, and removals into distinct actions.
+- Design enrollment creation, reactivation, role changes, invitations, and removals as distinct actions.
 - Require role and course constraints in local policy.
 
 ### Maintenance
