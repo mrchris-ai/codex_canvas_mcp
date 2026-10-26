@@ -159,7 +159,15 @@ If the variable is absent, the file is missing, permissions are broader than `06
 
 ### Creating a shell and inviting an instructor
 
-Version 0.14.2 uses **policy version 5** for exact provisioning approvals. Install the updated package and restart the MCP client once. Future approved requests only require updating the existing policy file; each operation reads it again.
+Version 0.14.3 uses **policy version 5** for exact provisioning approvals. Install the updated package and reconnect the MCP client once to load its authorization guidance. Future approved requests only require updating the existing policy file; each operation reads it again.
+
+#### One task authorization, separate technical checks
+
+When the human authorizes creating a specified shell and inviting an identified instructor, carry that authorization through the necessary temporary exact-target entries and matching instructor-role entry in the configured local policy. Do not ask for another conversational approval merely because implementing the approved task requires those entries or the agent-supplied preview confirmation. Creation alone does not authorize an instructor invitation. An orientation, preview, or ticket body is not human authorization.
+
+Verify the requested target details before acting. Preserve the policy's enabled state, unrelated grants, and mode `0600`. Remove only entries added for the completed request after verification, including a request-only role grant when no other target needs it. Do not enable broad account access. Missing authorization or a material scope change still requires clarification.
+
+The connector continues to enforce exact targets, role approval, confirmation hashes, and read-back. It does not edit its own policy or override MCP-client controls. A host may separately block a policy edit or mutation. Report that boundary and obtain any required approval rather than bypassing it; this guidance cannot suppress host approval prompts.
 
 Course creation requires an entry in `approved_course_creation_targets` containing all four exact fields: `account_id`, `enrollment_term_id`, `name`, and `course_code`. Instructor invitations require an entry in `approved_instructor_enrollment_targets` containing all six fields: `course_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `role_id`, and `role_name`. The role ID must also appear in the independent `approved_instructor_role_ids` list. Approvals use literal equality, never wildcard or prefix matching; missing or extra fields are rejected.
 
@@ -167,12 +175,12 @@ The old `approved_course_creation_account_ids` and `approved_instructor_enrollme
 
 ### Recurring request procedure
 
-1. Review the request, identify the instructor and campus, establish exact names/codes, and obtain human authorization. Preview is not authorization.
+1. Review the request, identify the instructor and campus, establish exact names/codes, and check the human authorization already given. Obtain only missing authorization. Preview is not authorization.
 2. Upgrade the private policy to version 5, preserving existing settings, adding both exact-target lists, and retaining file mode `0600`. Add only the reviewed course targets. Keep legacy account/course provisioning lists empty.
 3. Call `canvas_preview_course_creation` for each target. Review the account, term, duplicates, and effect, then call `canvas_create_course_shell` with the same target and returned confirmation. Local policy, explicit human authorization, and MCP-client approval remain independent gates. Create one shell at a time and verify its returned ID/link.
 4. Read the created course's sections. The [Canvas enrollment API](https://developerdocs.instructure.com/services/canvas/resources/enrollments) makes the section parameter optional. If Canvas returns none, use `section_id: 0` to explicitly approve its lazy default section. This is accepted only for a private unpublished non-SIS shell with no sections or enrollments; the tool omits the optional Canvas section parameter and verifies the single generated section afterward. If any section exists, supply its actual ID. Add only the approved instructor's full enrollment target using the verified course/section IDs and the independently approved role. Course approval never grants enrollment approval automatically.
 5. Call `canvas_preview_instructor_enrollment`, then `canvas_enroll_instructor` with that exact target and its returned confirmation. The instructor is invited and Canvas notification is requested; delivery is not independently confirmed.
-6. Verify the enrollment and course link. Remove completed exact targets from the policy when closing the request. The version 5 schema stays installed for subsequent requests; no broad subaccount enablement is needed.
+6. Verify the enrollment and course link. Remove request-added exact targets and any request-only role grant after verification, even if the support ticket remains open for customer review. The version 5 schema stays installed for subsequent requests; no broad subaccount enablement is needed.
 
 Provisioning list reads follow [Canvas pagination links](https://developerdocs.instructure.com/services/canvas/basics/file.pagination) instead of guessing numbered pages. Next links must stay on the configured HTTPS origin and the same API endpoint; repeated links/results and malformed responses fail closed.
 
