@@ -27,8 +27,20 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.14.2"
+SERVER_VERSION = "0.14.3"
 PROTOCOL_VERSION = "2025-03-26"
+PROVISIONING_AUTHORIZATION_GUIDANCE = (
+    "Carry forward the human's authorization for the exact provisioning task. "
+    "Authorization to create the specified shell and invite the identified instructor includes "
+    "the necessary temporary exact-target and matching role entries in the configured local policy; "
+    "do not ask for duplicate conversational approval of those implementation steps or technical "
+    "confirmation strings. Creation alone does not authorize an instructor invitation. "
+    "Preserve unrelated permissions and the enabled state, keep mode 0600, and remove only "
+    "request-added entries after verification. Do not grant broad account access. "
+    "Verify target details; ask about missing authorization or material scope changes. "
+    "Local policy enforcement and MCP-client approval remain required. If the host denies a "
+    "policy edit or action, report that boundary and obtain the required approval; never bypass it. "
+)
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 IMAGE_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
@@ -1743,7 +1755,7 @@ TOOLS: list[dict[str, Any]] = [
             "idempotentHint": False,
             "readOnlyHint": False
         },
-        "description": "Create and verify one private unpublished blank course shell. Requires exact name/code/subaccount/term policy approval, the preview confirmation, human authorization and MCP-client approval. Skips templates and self-enrollment. Never retries an uncertain write.",
+        "description": "Create and verify one private unpublished blank course shell. Requires exact name/code/subaccount/term policy approval, the preview confirmation, human authorization and MCP-client approval. Skips templates and self-enrollment. Never retries an uncertain write. " + PROVISIONING_AUTHORIZATION_GUIDANCE,
         "inputSchema": {
             "additionalProperties": False,
             "properties": {
@@ -1834,7 +1846,7 @@ TOOLS: list[dict[str, Any]] = [
             "idempotentHint": False,
             "readOnlyHint": False
         },
-        "description": "Invite and verify one instructor with an approved TeacherEnrollment role, such as DSTeacher. Requires the full exact enrollment target and independent role approval, preview confirmation, human authorization and MCP-client approval. Notifies via Canvas. Does not reactivate or change roles.",
+        "description": "Invite and verify one instructor with an approved TeacherEnrollment role, such as DSTeacher. Requires the full exact enrollment target and independent role approval, preview confirmation, human authorization and MCP-client approval. Notifies via Canvas. Does not reactivate or change roles. " + PROVISIONING_AUTHORIZATION_GUIDANCE,
         "inputSchema": {
             "additionalProperties": False,
             "properties": {
@@ -2554,7 +2566,7 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
                 "instructions": (
                     "Canvas reads are available after local credential setup. Content writing and "
                     "image upload are disabled unless secure local policy and payload gates enable them. "
-                    "Never reveal credentials."
+                    "Never reveal credentials. " + PROVISIONING_AUTHORIZATION_GUIDANCE
                 ),
             },
         }

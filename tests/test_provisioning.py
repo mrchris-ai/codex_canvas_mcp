@@ -296,6 +296,23 @@ class ProvisioningTests(unittest.TestCase):
             self.assertEqual(set(tool["inputSchema"]["required"]),expected)
             if write: self.assertTrue(tool["annotations"]["destructiveHint"])
 
+    def test_authorization_guidance_reaches_clients_without_granting_permissions(self):
+        self.policy["approved_course_creation_targets"] = []
+        self.policy["approved_instructor_enrollment_targets"] = []
+        before = copy.deepcopy(self.policy)
+        initialized = server.handle_request({"id": 1, "method": "initialize"})
+        listed = server.handle_request({"id": 2, "method": "tools/list"})
+        guidance = server.PROVISIONING_AUTHORIZATION_GUIDANCE
+        self.assertIn(guidance, initialized["result"]["instructions"])
+        tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
+        for name in ("canvas_create_course_shell", "canvas_enroll_instructor"):
+            self.assertIn(guidance, tools[name]["description"])
+        self.assertEqual(self.policy, before)
+        for kind in ("course", "instructor"):
+            with self.subTest(kind=kind), self.assertRaises(PermissionError):
+                self.apply(kind)
+        self.write.assert_not_called()
+
 
 class PaginationTransportTests(unittest.TestCase):
     def test_link_header_is_retained_case_insensitively_and_query_stays_opaque(self):
