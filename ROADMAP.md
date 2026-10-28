@@ -28,6 +28,8 @@ Each future feature needs its own narrow tool contract, least-privilege credenti
 
 ### User administration
 
+- Explicitly authorized username, primary email, and SIS ID updates are implemented through exact-target preview/update tools. Other account operations remain deferred.
+
 - One-student deactivation is implemented through a dedicated preview and guarded mutation. It does not remove an enrollment.
 - Resolve identities without exposing unnecessary profile data.
 - One exact instructor invitation is implemented for an existing Canvas/SIS identity and an approved TeacherEnrollment role. Existing conflicts are refused.
