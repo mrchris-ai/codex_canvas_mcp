@@ -8,6 +8,10 @@ repository files, included in tool output, or logged.
 from __future__ import annotations
 
 import json
+import io
+import stat
+import zipfile
+import xml.etree.ElementTree as ET
 import hashlib
 import ipaddress
 import math
@@ -27,7 +31,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.15.0"
+SERVER_VERSION = "0.16.0"
 PROTOCOL_VERSION = "2025-03-26"
 PROVISIONING_AUTHORIZATION_GUIDANCE = (
     "Carry forward the human's authorization for the exact provisioning task. "
@@ -41,6 +45,9 @@ PROVISIONING_AUTHORIZATION_GUIDANCE = (
     "Local policy enforcement and MCP-client approval remain required. If the host denies a "
     "policy edit or action, report that boundary and obtain the required approval; never bypass it. "
 )
+MAX_POWERPOINT_UPLOAD_BYTES = 25 * 1024 * 1024
+POWERPOINT_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 IMAGE_CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
@@ -576,6 +583,110 @@ def validate_image_file(value: Any) -> tuple[Path, str, int]:
     return resolved, content_type, stat.st_size
 
 
+def validate_powerpoint_file(value: Any) -> tuple[Path, bytes]:
+    """Validate a bounded, macro-free OOXML presentation and freeze its upload bytes."""
+    root = Path(required_env("CANVAS_POWERPOINT_UPLOAD_ROOT")).expanduser()
+    if not root.is_absolute() or root.is_symlink():
+        raise ConfigurationError("PowerPoint upload root must be absolute and not a symlink.")
+    root = root.resolve(strict=True)
+    if not root.is_dir() or root.stat().st_uid != os.getuid():
+        raise ConfigurationError("PowerPoint upload root must be a current-user-owned directory.")
+    path = Path(require_text(value, "file_path", 4096)).expanduser()
+    if not path.is_absolute() or path.is_symlink():
+        raise ValueError("PowerPoint path must be absolute and not a symlink.")
+    path = path.resolve(strict=True)
+    if not path.is_relative_to(root):
+        raise PermissionError("PowerPoint file must be inside CANVAS_POWERPOINT_UPLOAD_ROOT.")
+    if path.suffix.lower() != ".pptx" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._()-]{0,254}", path.name):
+        raise ValueError("Only .pptx files with plain filenames may be uploaded.")
+    before = path.stat()
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid():
+        raise PermissionError("PowerPoint must be a current-user-owned regular file.")
+    if not 0 < before.st_size <= MAX_POWERPOINT_UPLOAD_BYTES:
+        raise ValueError("PowerPoint must be between 1 byte and 25 MiB.")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError("PowerPoint changed during validation.")
+        data = handle.read(MAX_POWERPOINT_UPLOAD_BYTES + 1)
+    if len(data) != before.st_size:
+        raise ValueError("PowerPoint changed during validation or exceeds the size limit.")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = archive.infolist()
+            names = [item.filename for item in entries]
+            if len(entries) > 4096 or len(set(names)) != len(names):
+                raise ValueError("PowerPoint contains too many or duplicate ZIP entries.")
+            if sum(item.file_size for item in entries) > 100 * 1024 * 1024:
+                raise ValueError("PowerPoint expanded contents exceed 100 MiB.")
+            for item in entries:
+                name = item.filename.lower()
+                if (item.flag_bits & 1 or name.startswith("/") or "\\" in name
+                        or ".." in name.split("/") or stat.S_ISLNK(item.external_attr >> 16)
+                        or "vbaproject" in name or "/activex/" in name
+                        or name.endswith((".exe", ".dll", ".js", ".vbs", ".bat", ".com"))):
+                    raise ValueError("PowerPoint contains an unsafe ZIP entry or active content.")
+            def xml_part(name: str):
+                info = archive.getinfo(name)
+                if info.file_size > 2 * 1024 * 1024:
+                    raise ValueError("PowerPoint XML metadata exceeds 2 MiB.")
+                raw = archive.read(name)
+                declarations = raw.replace(b"\x00", b"").upper()
+                if b"<!DOCTYPE" in declarations or b"<!ENTITY" in declarations:
+                    raise ValueError("PowerPoint XML declarations are not supported.")
+                return ET.fromstring(raw)
+            types = xml_part("[Content_Types].xml")
+            if any("macroenabled" in e.attrib.get("ContentType", "").lower()
+                   or "vbaproject" in e.attrib.get("ContentType", "").lower() for e in types):
+                raise ValueError("Macro-enabled PowerPoint content is not supported.")
+            main_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+            if not any(e.attrib.get("PartName") == "/ppt/presentation.xml"
+                       and e.attrib.get("ContentType") == main_type for e in types):
+                raise ValueError("File is not a standard PowerPoint presentation.")
+            presentation = xml_part("ppt/presentation.xml")
+            if presentation.tag != "{http://schemas.openxmlformats.org/presentationml/2006/main}presentation":
+                raise ValueError("Invalid PowerPoint presentation XML.")
+            relationships = xml_part("_rels/.rels")
+            if not any(e.attrib.get("Type", "").endswith("/officeDocument")
+                       and e.attrib.get("Target") in ("ppt/presentation.xml", "/ppt/presentation.xml")
+                       and e.attrib.get("TargetMode", "Internal") == "Internal" for e in relationships):
+                raise ValueError("Missing PowerPoint package relationship.")
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, RuntimeError, NotImplementedError) as exc:
+        raise ValueError("File is not a readable PowerPoint OOXML package.") from exc
+    return path, data
+
+
+def upload_canvas_powerpoint(args: dict[str, Any]) -> dict[str, Any]:
+    course_id = require_course_id(args.get("course_id"))
+    require_write_approval(course_id, args.get("confirmation"), "POWERPOINT UPLOAD")
+    path, data = validate_powerpoint_file(args.get("file_path"))
+    initial = request_api("POST", f"/api/v1/courses/{course_id}/files", data={
+        "name": path.name, "size": len(data), "content_type": POWERPOINT_CONTENT_TYPE,
+        "on_duplicate": "rename",
+    })
+    if not isinstance(initial, dict):
+        raise RuntimeError("Canvas returned an invalid PowerPoint upload response.")
+    status, location = post_image_payload(initial.get("upload_url"), initial.get("upload_params"),
+                                          path, POWERPOINT_CONTENT_TYPE, file_data=data)
+    if not (300 <= status < 400 or status == 201):
+        raise RuntimeError(f"Canvas PowerPoint storage returned unexpected HTTP {status}; do not retry automatically.")
+    created = request_canvas_location("GET", location)
+    if not isinstance(created, dict):
+        raise RuntimeError("Canvas returned an invalid completed PowerPoint upload.")
+    file_id = require_positive_id(created.get("id"), "file_id")
+    verified = api_get(f"/api/v1/courses/{course_id}/files/{file_id}")
+    if (not isinstance(verified, dict) or verified.get("id") != file_id
+            or verified.get("size") != len(data)
+            or (verified.get("content-type") or verified.get("content_type")) != POWERPOINT_CONTENT_TYPE):
+        raise RuntimeError("Canvas PowerPoint verification failed; inspect the uploaded file before retrying.")
+    return {"id": file_id, "display_name": verified.get("display_name"),
+            "content_type": POWERPOINT_CONTENT_TYPE, "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "canvas_path": f"/courses/{course_id}/files/{file_id}/preview",
+            "download_url": f"{canvas_base_url()}/courses/{course_id}/files/{file_id}/download"}
+
+
 def validate_upload_url(value: Any) -> str:
     if not isinstance(value, str):
         raise RuntimeError("Canvas returned an invalid image upload URL.")
@@ -599,6 +710,7 @@ def multipart_image_body(
     upload_params: Any,
     image_path: Path,
     content_type: str,
+    *, file_data: bytes | None = None,
 ) -> tuple[bytes, str]:
     if not isinstance(upload_params, dict) or not upload_params:
         raise RuntimeError("Canvas returned no image upload parameters.")
@@ -622,7 +734,7 @@ def multipart_image_body(
             f"Content-Type: {content_type}\r\n\r\n"
         ).encode("utf-8")
     )
-    body.extend(image_path.read_bytes())
+    body.extend(image_path.read_bytes() if file_data is None else file_data)
     body.extend(f"\r\n--{boundary}--\r\n".encode("ascii"))
     return bytes(body), boundary
 
@@ -637,9 +749,10 @@ def post_image_payload(
     upload_params: Any,
     image_path: Path,
     content_type: str,
+    *, file_data: bytes | None = None,
 ) -> tuple[int, str | None]:
     url = validate_upload_url(upload_url)
-    body, boundary = multipart_image_body(upload_params, image_path, content_type)
+    body, boundary = multipart_image_body(upload_params, image_path, content_type, file_data=file_data)
     request = urllib.request.Request(
         url,
         data=body,
@@ -2159,6 +2272,27 @@ TOOLS: list[dict[str, Any]] = [
         "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True},
     },
     {
+        "name": "canvas_upload_powerpoint",
+        "description": (
+            "Upload one validated, macro-free .pptx presentation (maximum 25 MiB) from "
+            "CANVAS_POWERPOINT_UPLOAD_ROOT to an approved course. Requires explicit human "
+            "authorization, local policy and confirmation APPROVE CANVAS POWERPOINT UPLOAD WRITE "
+            "course <course_id>. Never automatically retry "
+            "an uncertain upload. Returns a verified persistent download link."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "course_id": {"type": "integer", "minimum": 1},
+                "file_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "confirmation": {"type": "string"},
+            },
+            "required": ["course_id", "file_path", "confirmation"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    },
+    {
         "name": "canvas_upload_image",
         "description": (
             "Upload exactly one locally verified PNG, JPEG, or WebP image to an approved Canvas "
@@ -2573,6 +2707,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return preview_student_deactivation(args)
     if name == "canvas_deactivate_student_enrollment":
         return deactivate_student_enrollment(args)
+    if name == "canvas_upload_powerpoint":
+        return upload_canvas_powerpoint(args)
     if name == "canvas_upload_image":
         return upload_canvas_image(args)
     if name == "canvas_write_page":
@@ -2743,7 +2879,7 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                 "instructions": (
                     "Canvas reads are available after local credential setup. Content writing and "
-                    "image upload are disabled unless secure local policy and payload gates enable them. "
+                    "image/PowerPoint uploads are disabled unless secure local policy and payload gates enable them. "
                     "Never reveal credentials. " + API_FIRST_GUIDANCE + PROVISIONING_AUTHORIZATION_GUIDANCE + USER_UPDATE_AUTHORIZATION_GUIDANCE
                 ),
             },

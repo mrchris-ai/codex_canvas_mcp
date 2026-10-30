@@ -10,7 +10,7 @@ Each future feature needs its own narrow tool contract, least-privilege credenti
 
 ### Generic file upload and New Quizzes
 
-- Image-only upload is implemented with trusted-root, ownership, size, type/signature, per-course policy, exact confirmation, storage-host, completion-origin, and post-upload verification gates. Expanding beyond PNG, JPEG, and WebP remains deferred and requires a new payload-specific review.
+- Image-only upload is implemented with trusted-root, ownership, size, type/signature, per-course policy, exact confirmation, storage-host, completion-origin, and post-upload verification gates. A separately gated, payload-validated `.pptx` uploader is now implemented. Other file types remain deferred and require a payload-specific review.
 - Generic document, archive, audio, video, and other local-file upload remain unsupported.
 - New Quizzes needs a reviewed tool contract; it is distinct from the Classic Quiz API.
 
