@@ -247,6 +247,10 @@ Use `canvas_preview_user_update` followed by `canvas_update_user_account` for ex
 
 Install the new source and reconnect the client once for tool discovery. Future requests only need the temporary exact target in the private policy, removed after verification. A username change does not automatically change email or SIS ID. See [contract, authorization, recovery, and API references](docs/2026-10-28-user-account-updates.md).
 
+## Guarded student invitation (0.17.0)
+
+`canvas_preview_student_enrollment` checks the exact Canvas user, SIS user, SIS course, section, and built-in StudentEnrollment role. `canvas_enroll_student` requires explicit human authorization, its preview confirmation, MCP-client approval, and one matching entry in `approved_student_enrollment_targets` in policy version 7. The target has `course_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `sis_course_id`, and `role_id`. An identical active or invited enrollment returns a verified no-op. A conflicting enrollment blocks the write. A new invitation notifies the student and is read back; an uncertain result must be inspected before any retry. Existing policies remain readable with an empty student-target list. Remove temporary target entries after verification.
+
 ## API-first workflow
 
 Use the connector API for supported reads and authorized changes. Handle exact temporary policy entries and technical confirmation values within the user's existing authorization. If installed tools are missing from the active session, reconnect before using them; do not switch to browser editing solely because of that setup step. Use the in-app browser only for a capability the connector does not expose or for necessary visual inspection, explaining the limitation first. Permission and approval denials apply regardless of the interface and must never be bypassed.

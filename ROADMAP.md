@@ -33,7 +33,7 @@ Each future feature needs its own narrow tool contract, least-privilege credenti
 - One-student deactivation is implemented through a dedicated preview and guarded mutation. It does not remove an enrollment.
 - Resolve identities without exposing unnecessary profile data.
 - One exact instructor invitation is implemented for an existing Canvas/SIS identity and an approved TeacherEnrollment role. Existing conflicts are refused.
-- Student enrollment creation, reactivation, role changes, removals, and broader invitations remain deferred.
+- Broad student enrollment creation, reactivation, role changes, removals, and broader invitations remain deferred. A guarded exact student invitation is implemented.
 - Require role and course constraints in local policy.
 
 ### Maintenance
