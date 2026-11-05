@@ -72,6 +72,47 @@ class StudentEnrollmentCreationTests(unittest.TestCase):
         self.assertEqual((result["changed"], result["verified"]), (True, True))
         self.write.assert_called_once()
 
+    def test_exact_deleted_enrollment_can_be_restored(self):
+        self.records = [{**self.record, "enrollment_state": "deleted"}]
+        preview = server.preview_student_enrollment(self.target)
+        self.assertEqual((preview["existing_enrollment"], preview["existing_state"]), (70, "deleted"))
+        result = server.enroll_student({**self.target, "confirmation": preview["confirmation"]})
+        self.assertEqual((result["changed"], result["verified"], result["enrollment_state"]),
+                         (True, True, "invited"))
+        self.write.assert_called_once()
+
+    def test_new_invitation_may_coexist_with_exact_deleted_history(self):
+        old = {**self.record, "enrollment_state": "deleted"}
+        self.records = [old]
+
+        def create_new(method, path, *, data):
+            self.assertEqual((method, path), ("POST", "/api/v1/courses/30/enrollments"))
+            self.records = [old, {**self.record, "id": 71}]
+            return {"id": 71}
+
+        self.write.side_effect = create_new
+        result = server.enroll_student({**self.target,
+                                        "confirmation": server.student_enrollment_confirmation(self.target)})
+        self.assertEqual((result["enrollment_id"], result["enrollment_state"]), (71, "invited"))
+
+    def test_deleted_enrollment_with_a_different_target_still_blocks(self):
+        self.records = [{**self.record, "enrollment_state": "deleted", "course_section_id": 41}]
+        with self.assertRaises(ValueError):
+            server.preview_student_enrollment(self.target)
+        self.write.assert_not_called()
+
+    def test_unexpected_read_back_after_deleted_record_never_retries(self):
+        self.records = [{**self.record, "enrollment_state": "deleted"}]
+
+        def no_change(method, path, *, data):
+            return {"id": 70}
+
+        self.write.side_effect = no_change
+        with self.assertRaisesRegex(RuntimeError, "needs inspection"):
+            server.enroll_student({**self.target,
+                                   "confirmation": server.student_enrollment_confirmation(self.target)})
+        self.write.assert_called_once()
+
     def test_enabled_legacy_policy_invites_without_student_target(self):
         self.records = []
         with tempfile.TemporaryDirectory() as directory:

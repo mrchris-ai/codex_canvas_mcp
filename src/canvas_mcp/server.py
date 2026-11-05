@@ -31,7 +31,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.17.0"
+SERVER_VERSION = "0.17.1"
 PROTOCOL_VERSION = "2025-03-26"
 PROVISIONING_AUTHORIZATION_GUIDANCE = (
     "Carry forward the human's authorization for the exact provisioning task. "
@@ -1911,7 +1911,7 @@ def student_enrollment_preflight(target: dict[str, Any]) -> tuple[dict[str, Any]
     records = provisioning_list(f"/api/v1/courses/{course_id}/enrollments",
                                 {"user_id": target["canvas_user_id"], "state[]": ENROLLMENT_STATES})
     if records and (len(records) != 1 or not student_enrollment_matches(records[0], target)
-                    or records[0].get("enrollment_state") not in {"active", "invited"}):
+                    or records[0].get("enrollment_state") not in {"active", "invited", "deleted"}):
         raise ValueError("An existing enrollment conflicts with this exact student invitation; no change was made.")
     return {"course_name": course.get("name"), "student_name": user.get("name")}, records
 
@@ -1922,7 +1922,9 @@ def preview_student_enrollment(args: dict[str, Any]) -> dict[str, Any]:
     return {**target, **context, "existing_enrollment": records[0]["id"] if records else None,
             "existing_state": records[0]["enrollment_state"] if records else None,
             "confirmation": student_enrollment_confirmation(target),
-            "effect": "Invite the exact student with the active student role in the exact SIS course section and notify via Canvas. An identical active or invited enrollment is a no-op."}
+            "effect": ("Re-enroll the exact student in this SIS course section and notify via Canvas; verify the new invitation against the deleted record."
+                       if records and records[0]["enrollment_state"] == "deleted" else
+                       "Invite the exact student with the active student role in the exact SIS course section and notify via Canvas. An identical active or invited enrollment is a no-op.")}
 
 
 def enroll_student(args: dict[str, Any]) -> dict[str, Any]:
@@ -1933,7 +1935,7 @@ def enroll_student(args: dict[str, Any]) -> dict[str, Any]:
     if args["confirmation"] != student_enrollment_confirmation(target):
         raise PermissionError("Confirmation must exactly match the preview.")
     _, records = student_enrollment_preflight(target)
-    if records:
+    if records and records[0]["enrollment_state"] in {"active", "invited"}:
         return {"changed": False, "verified": True, "enrollment_id": records[0]["id"],
                 "enrollment_state": records[0]["enrollment_state"], "role": "StudentEnrollment",
                 "student_url": f"{canvas_base_url()}/courses/{target['course_id']}/users/{target['canvas_user_id']}"}
@@ -1949,12 +1951,15 @@ def enroll_student(args: dict[str, Any]) -> dict[str, Any]:
         enrollment_id = require_positive_id(created.get("id"), "created enrollment_id")
         after = provisioning_list(f"/api/v1/courses/{target['course_id']}/enrollments",
                                   {"user_id": target["canvas_user_id"], "state[]": ENROLLMENT_STATES})
-        if len(after) != 1 or after[0].get("id") != enrollment_id or not student_enrollment_matches(after[0], target) or after[0].get("enrollment_state") not in {"active", "invited"}:
+        live = [record for record in after if record.get("enrollment_state") in {"active", "invited"}]
+        if (len(live) != 1 or live[0].get("id") != enrollment_id
+                or not all(student_enrollment_matches(record, target) for record in after)
+                or any(record is not live[0] and record.get("enrollment_state") != "deleted" for record in after)):
             raise ValueError("Student enrollment did not match on read-back.")
     except Exception as exc:
         raise RuntimeError(f"Student enrollment outcome needs inspection (enrollment ID: {enrollment_id}). Do not automatically retry.") from exc
     return {"changed": True, "verified": True, "enrollment_id": enrollment_id,
-            "enrollment_state": after[0]["enrollment_state"], "role": "StudentEnrollment",
+            "enrollment_state": live[0]["enrollment_state"], "role": "StudentEnrollment",
             "student_url": f"{canvas_base_url()}/courses/{target['course_id']}/users/{target['canvas_user_id']}"}
 
 
@@ -2804,7 +2809,7 @@ for _name, _apply in (("canvas_preview_student_enrollment", False), ("canvas_enr
         _properties["confirmation"] = {"type": "string"}
     TOOLS.append({
         "name": _name,
-        "description": "Preview or invite one exact student into an exact SIS course section with the built-in StudentEnrollment role. An identical active or invited enrollment is a no-op. The write requires explicit human authorization, an enabled local write policy, the preview confirmation, and MCP-client approval; no per-student policy edit is needed. Never retries an uncertain write.",
+        "description": "Preview or invite one exact student into an exact SIS course section with the built-in StudentEnrollment role. An identical active or invited enrollment is a no-op; one exact deleted enrollment can be re-enrolled and verified. Other conflicts block the write. The write requires explicit human authorization, an enabled local write policy, the preview confirmation, and MCP-client approval; no per-student policy edit is needed. Never retries an uncertain write.",
         "inputSchema": {"type": "object", "properties": _properties,
                         "required": list(_properties), "additionalProperties": False},
         "annotations": {"readOnlyHint": not _apply, "destructiveHint": _apply, "idempotentHint": False},
