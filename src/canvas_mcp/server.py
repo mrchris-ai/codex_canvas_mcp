@@ -212,7 +212,7 @@ def api_get(path: str, query: dict[str, Any] | None = None) -> Any:
 
 def disabled_policy() -> dict[str, Any]:
     return {
-        "version": 7,
+        "version": 8,
         "enabled": False,
         "approved_course_ids": [],
         "approved_rubric_delete_course_ids": [],
@@ -223,7 +223,6 @@ def disabled_policy() -> dict[str, Any]:
         "approved_course_creation_targets": [],
         "approved_instructor_enrollment_targets": [],
         "approved_user_update_targets": [],
-        "approved_student_enrollment_targets": [],
     }
 
 
@@ -248,23 +247,23 @@ def write_policy() -> dict[str, Any]:
         raise ConfigurationError("The Canvas write policy must be a JSON object.")
     version = policy.get("version")
     expected_keys = {"version", "enabled", "approved_course_ids"}
-    if version in {2, 3, 4, 5, 6, 7}:
+    if version in {2, 3, 4, 5, 6, 7, 8}:
         expected_keys.add("approved_rubric_delete_course_ids")
-    if version in {3, 4, 5, 6, 7}:
+    if version in {3, 4, 5, 6, 7, 8}:
         expected_keys.add("approved_student_deactivation_course_ids")
     provision_keys = ("approved_course_creation_account_ids",
                       "approved_instructor_enrollment_course_ids", "approved_instructor_role_ids")
-    if version in {4, 5, 6, 7}:
+    if version in {4, 5, 6, 7, 8}:
         expected_keys.update(provision_keys)
-    if version in {5, 6, 7}:
+    if version in {5, 6, 7, 8}:
         expected_keys.update(("approved_course_creation_targets", "approved_instructor_enrollment_targets"))
-    if version in {6, 7}:
+    if version in {6, 7, 8}:
         expected_keys.add("approved_user_update_targets")
     if version == 7:
         expected_keys.add("approved_student_enrollment_targets")
     if set(policy) != expected_keys:
         raise ConfigurationError("The Canvas write policy contains unexpected keys.")
-    if type(version) is not int or version not in {1, 2, 3, 4, 5, 6, 7} or not isinstance(policy["enabled"], bool):
+    if type(version) is not int or version not in {1, 2, 3, 4, 5, 6, 7, 8} or not isinstance(policy["enabled"], bool):
         raise ConfigurationError("The Canvas write policy has invalid version or enabled values.")
     course_ids = policy["approved_course_ids"]
     if not isinstance(course_ids, list) or any(
@@ -334,23 +333,25 @@ def write_policy() -> dict[str, Any]:
         if target in validated_updates:
             raise ConfigurationError("Duplicate user-update target.")
         validated_updates.append(target)
-    student_targets = policy.get("approved_student_enrollment_targets", [])
-    if not isinstance(student_targets, list):
-        raise ConfigurationError("approved_student_enrollment_targets must be a list.")
-    validated_students = []
-    for value in student_targets:
-        try:
-            target = student_enrollment_target(value, False)
-        except (ValueError, TypeError) as exc:
-            raise ConfigurationError("Invalid student-enrollment target.") from exc
-        if target in validated_students:
-            raise ConfigurationError("Duplicate student-enrollment target.")
-        validated_students.append(target)
+    # Version 7 required exact student targets. Accept and validate legacy files,
+    # but do not use their entries as an authorization gate.
+    if version == 7:
+        student_targets = policy["approved_student_enrollment_targets"]
+        if not isinstance(student_targets, list):
+            raise ConfigurationError("approved_student_enrollment_targets must be a list.")
+        validated_students = []
+        for value in student_targets:
+            try:
+                target = student_enrollment_target(value, False)
+            except (ValueError, TypeError) as exc:
+                raise ConfigurationError("Invalid student-enrollment target.") from exc
+            if target in validated_students:
+                raise ConfigurationError("Duplicate student-enrollment target.")
+            validated_students.append(target)
     return {
-        "approved_student_enrollment_targets": validated_students,
         "approved_user_update_targets": validated_updates,
         **provision_policy,
-        "version": 7 if version == 7 else 6,
+        "version": 8,
         "enabled": policy["enabled"],
         "approved_course_ids": course_ids,
         "approved_rubric_delete_course_ids": rubric_delete_course_ids,
@@ -1927,8 +1928,8 @@ def preview_student_enrollment(args: dict[str, Any]) -> dict[str, Any]:
 def enroll_student(args: dict[str, Any]) -> dict[str, Any]:
     target = student_enrollment_target(args, True)
     policy = write_policy()
-    if not policy["enabled"] or target not in policy.get("approved_student_enrollment_targets", []):
-        raise PermissionError("Student enrollment requires an approved exact target in a version 7 local policy.")
+    if not policy["enabled"]:
+        raise PermissionError("Student enrollment requires an enabled local write policy.")
     if args["confirmation"] != student_enrollment_confirmation(target):
         raise PermissionError("Confirmation must exactly match the preview.")
     _, records = student_enrollment_preflight(target)
@@ -2803,7 +2804,7 @@ for _name, _apply in (("canvas_preview_student_enrollment", False), ("canvas_enr
         _properties["confirmation"] = {"type": "string"}
     TOOLS.append({
         "name": _name,
-        "description": "Preview or invite one exact student into an exact SIS course section with the approved StudentEnrollment role. An identical active or invited enrollment is a no-op. Requires human authorization, an exact version 7 policy target and MCP-client approval for the write. Never retries an uncertain write.",
+        "description": "Preview or invite one exact student into an exact SIS course section with the built-in StudentEnrollment role. An identical active or invited enrollment is a no-op. The write requires explicit human authorization, an enabled local write policy, the preview confirmation, and MCP-client approval; no per-student policy edit is needed. Never retries an uncertain write.",
         "inputSchema": {"type": "object", "properties": _properties,
                         "required": list(_properties), "additionalProperties": False},
         "annotations": {"readOnlyHint": not _apply, "destructiveHint": _apply, "idempotentHint": False},

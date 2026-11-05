@@ -24,8 +24,7 @@ class StudentEnrollmentCreationTests(unittest.TestCase):
             "limit_privileges_to_course_section": False, "enrollment_state": "invited",
         }
         self.records = [copy.deepcopy(self.record)]
-        self.policy = {**server.disabled_policy(), "enabled": True,
-                       "approved_student_enrollment_targets": [self.target]}
+        self.policy = {**server.disabled_policy(), "enabled": True}
         self.read = mock.patch.object(server, "api_get", side_effect=self.fake_read).start()
         self.list = mock.patch.object(server, "provisioning_list", side_effect=self.fake_list).start()
         self.write = mock.patch.object(server, "request_api", side_effect=self.fake_write).start()
@@ -73,7 +72,23 @@ class StudentEnrollmentCreationTests(unittest.TestCase):
         self.assertEqual((result["changed"], result["verified"]), (True, True))
         self.write.assert_called_once()
 
-    def test_conflict_or_missing_approval_never_writes(self):
+    def test_enabled_legacy_policy_invites_without_student_target(self):
+        self.records = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            path.touch(mode=0o600)
+            policy = {key: value for key, value in server.disabled_policy().items()
+                      if key != "approved_user_update_targets"}
+            policy.update(version=5, enabled=True)
+            path.write_text(json.dumps(policy))
+            with mock.patch.dict(os.environ, {"CANVAS_WRITE_POLICY": str(path)}), \
+                 mock.patch.object(server, "write_policy", side_effect=REAL_WRITE_POLICY):
+                result = server.enroll_student({**self.target,
+                                                "confirmation": server.student_enrollment_confirmation(self.target)})
+        self.assertTrue(result["verified"])
+        self.write.assert_called_once()
+
+    def test_conflict_or_disabled_policy_never_writes(self):
         confirmation = server.student_enrollment_confirmation(self.target)
         for change in ({"role_id": 61}, {"enrollment_state": "inactive"},
                        {"course_section_id": 41}):
@@ -82,7 +97,7 @@ class StudentEnrollmentCreationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     server.enroll_student({**self.target, "confirmation": confirmation})
         self.records = []
-        self.policy["approved_student_enrollment_targets"] = []
+        self.policy["enabled"] = False
         with self.assertRaises(PermissionError):
             server.enroll_student({**self.target, "confirmation": confirmation})
         self.write.assert_not_called()
@@ -99,20 +114,26 @@ class StudentEnrollmentCreationTests(unittest.TestCase):
         self.assertFalse(tools["canvas_enroll_student"]["annotations"]["readOnlyHint"])
         self.write.assert_not_called()
 
-    def test_version_7_policy_requires_exact_unique_target(self):
+    def test_version_8_needs_no_student_target_and_version_7_is_legacy(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "policy.json"
             path.touch(mode=0o600)
             with mock.patch.dict(os.environ, {"CANVAS_WRITE_POLICY": str(path)}):
-                current = {**server.disabled_policy(), "enabled": True,
-                           "approved_student_enrollment_targets": [self.target]}
+                current = {**server.disabled_policy(), "enabled": True}
                 path.write_text(json.dumps(current))
-                self.assertEqual(REAL_WRITE_POLICY()["approved_student_enrollment_targets"], [self.target])
+                self.assertEqual(REAL_WRITE_POLICY(), current)
+                legacy = {**current, "version": 7,
+                          "approved_student_enrollment_targets": [self.target]}
+                path.write_text(json.dumps(legacy))
+                self.assertEqual(REAL_WRITE_POLICY(), current)
                 for bad in ([self.target, self.target], [{**self.target, "role_id": True}],
                             [{**self.target, "extra": 1}]):
-                    path.write_text(json.dumps({**current, "approved_student_enrollment_targets": bad}))
+                    path.write_text(json.dumps({**legacy, "approved_student_enrollment_targets": bad}))
                     with self.subTest(bad=bad), self.assertRaises(server.ConfigurationError):
                         REAL_WRITE_POLICY()
+                path.write_text(json.dumps({**current, "approved_student_enrollment_targets": []}))
+                with self.assertRaises(server.ConfigurationError):
+                    REAL_WRITE_POLICY()
 
 
 if __name__ == "__main__":
