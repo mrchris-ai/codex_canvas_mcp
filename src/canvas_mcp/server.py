@@ -31,7 +31,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.17.1"
+SERVER_VERSION = "0.18.0"
 PROTOCOL_VERSION = "2025-03-26"
 PROVISIONING_AUTHORIZATION_GUIDANCE = (
     "Carry forward the human's authorization for the exact provisioning task. "
@@ -212,7 +212,7 @@ def api_get(path: str, query: dict[str, Any] | None = None) -> Any:
 
 def disabled_policy() -> dict[str, Any]:
     return {
-        "version": 8,
+        "version": 9,
         "enabled": False,
         "approved_course_ids": [],
         "approved_rubric_delete_course_ids": [],
@@ -223,6 +223,7 @@ def disabled_policy() -> dict[str, Any]:
         "approved_course_creation_targets": [],
         "approved_instructor_enrollment_targets": [],
         "approved_user_update_targets": [],
+        "approved_user_creation_fingerprints": [],
     }
 
 
@@ -247,23 +248,25 @@ def write_policy() -> dict[str, Any]:
         raise ConfigurationError("The Canvas write policy must be a JSON object.")
     version = policy.get("version")
     expected_keys = {"version", "enabled", "approved_course_ids"}
-    if version in {2, 3, 4, 5, 6, 7, 8}:
+    if version in {2, 3, 4, 5, 6, 7, 8, 9}:
         expected_keys.add("approved_rubric_delete_course_ids")
-    if version in {3, 4, 5, 6, 7, 8}:
+    if version in {3, 4, 5, 6, 7, 8, 9}:
         expected_keys.add("approved_student_deactivation_course_ids")
     provision_keys = ("approved_course_creation_account_ids",
                       "approved_instructor_enrollment_course_ids", "approved_instructor_role_ids")
-    if version in {4, 5, 6, 7, 8}:
+    if version in {4, 5, 6, 7, 8, 9}:
         expected_keys.update(provision_keys)
-    if version in {5, 6, 7, 8}:
+    if version in {5, 6, 7, 8, 9}:
         expected_keys.update(("approved_course_creation_targets", "approved_instructor_enrollment_targets"))
-    if version in {6, 7, 8}:
+    if version in {6, 7, 8, 9}:
         expected_keys.add("approved_user_update_targets")
     if version == 7:
         expected_keys.add("approved_student_enrollment_targets")
+    if version == 9:
+        expected_keys.add("approved_user_creation_fingerprints")
     if set(policy) != expected_keys:
         raise ConfigurationError("The Canvas write policy contains unexpected keys.")
-    if type(version) is not int or version not in {1, 2, 3, 4, 5, 6, 7, 8} or not isinstance(policy["enabled"], bool):
+    if type(version) is not int or version not in range(1, 10) or not isinstance(policy["enabled"], bool):
         raise ConfigurationError("The Canvas write policy has invalid version or enabled values.")
     course_ids = policy["approved_course_ids"]
     if not isinstance(course_ids, list) or any(
@@ -348,10 +351,19 @@ def write_policy() -> dict[str, Any]:
             if target in validated_students:
                 raise ConfigurationError("Duplicate student-enrollment target.")
             validated_students.append(target)
+    creation_fingerprints = policy.get("approved_user_creation_fingerprints", [])
+    if not isinstance(creation_fingerprints, list) or any(
+        not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+        for value in creation_fingerprints
+    ):
+        raise ConfigurationError("User creation approvals must be SHA-256 fingerprints.")
+    if len(creation_fingerprints) != len(set(creation_fingerprints)):
+        raise ConfigurationError("User creation approvals must not contain duplicates.")
     return {
         "approved_user_update_targets": validated_updates,
+        "approved_user_creation_fingerprints": creation_fingerprints,
         **provision_policy,
-        "version": 8,
+        "version": 9,
         "enabled": policy["enabled"],
         "approved_course_ids": course_ids,
         "approved_rubric_delete_course_ids": rubric_delete_course_ids,
@@ -2096,6 +2108,113 @@ def update_user_account(args: dict[str, Any]) -> dict[str, Any]:
             "previous_value": target["expected_value"], "current_value": user_update_value(after, target)}
 
 
+USER_CREATION_PROPERTIES = {
+    "account_id": {"type": "integer", "minimum": 1},
+    "name": {"type": "string", "minLength": 1, "maxLength": 255},
+    "short_name": {"type": "string", "minLength": 1, "maxLength": 255},
+    "sortable_name": {"type": "string", "minLength": 1, "maxLength": 255},
+    "email": {"type": "string", "minLength": 3, "maxLength": 255},
+    "sis_user_id": {"type": "string", "pattern": "^[0-9]{10}$"},
+}
+
+
+def user_creation_target(args: dict[str, Any], apply: bool) -> dict[str, Any]:
+    fields = set(USER_CREATION_PROPERTIES) | ({"confirmation"} if apply else set())
+    if not isinstance(args, dict) or set(args) != fields:
+        raise ValueError("User creation requires only the exact documented target fields.")
+    target = {"account_id": require_positive_id(args["account_id"], "account_id")}
+    for key in USER_CREATION_PROPERTIES.keys() - {"account_id"}:
+        value = require_text(args[key], key)
+        if value != value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("User creation fields cannot contain outer whitespace or control characters.")
+        target[key] = value
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", target["email"]):
+        raise ValueError("email must be an institutional email address.")
+    if not re.fullmatch(r"[0-9]{10}", target["sis_user_id"]):
+        raise ValueError("sis_user_id must be the student's 10-digit SIS ID as a string.")
+    return target
+
+
+def user_creation_fingerprint(target: dict[str, Any]) -> str:
+    approval = {"origin": canvas_base_url(), "operation": "create_student_account", "target": target}
+    return hashlib.sha256(json.dumps(approval, sort_keys=True).encode()).hexdigest()
+
+
+def user_creation_preflight(target: dict[str, Any]) -> str:
+    account_path = f"/api/v1/accounts/{target['account_id']}"
+    account = api_get("/api/v1/accounts/self")
+    if (not isinstance(account, dict) or account.get("id") != target["account_id"]
+            or account.get("workflow_state") != "active" or "parent_account_id" not in account
+            or account["parent_account_id"] is not None):
+        raise ValueError("The target must be the exact active Canvas root account.")
+    required = ["manage_user_logins", "manage_sis"]
+    permissions = api_get(f"{account_path}/permissions", {"permissions[]": required})
+    if not isinstance(permissions, dict) or any(permissions.get(key) is not True for key in required):
+        raise PermissionError("Canvas user-login and SIS permissions are required.")
+
+    for identifier, value in (("sis_user_id", target["sis_user_id"]), ("sis_login_id", target["email"])):
+        encoded = urllib.parse.quote(value, safe="")
+        try:
+            api_get(f"/api/v1/users/{identifier}:{encoded}/profile")
+        except RuntimeError as exc:
+            if not isinstance(exc.__cause__, urllib.error.HTTPError) or exc.__cause__.code != 404:
+                raise
+        else:
+            raise ValueError("An existing Canvas account matches the requested SIS ID or login.")
+
+    if provisioning_list(f"{account_path}/users", {"search_term": target["email"], "include_deleted_users": True}):
+        raise ValueError("Canvas returned an account for the requested email. Review the possible match first.")
+    return require_text(account.get("name"), "account_name")
+
+
+def preview_user_creation(args: dict[str, Any]) -> dict[str, Any]:
+    target = user_creation_target(args, False)
+    account_name = user_creation_preflight(target)
+    fingerprint = user_creation_fingerprint(target)
+    return {"target": target, "account_name": account_name, "approval_fingerprint": fingerprint,
+            "confirmation": f"APPROVE CANVAS USER CREATION {fingerprint}", "read_only": True,
+            "effect": "Create one student account, request Canvas's account email, and leave enrollment separate."}
+
+
+def create_user_account(args: dict[str, Any]) -> dict[str, Any]:
+    target = user_creation_target(args, True)
+    fingerprint = user_creation_fingerprint(target)
+    policy = write_policy()
+    if not policy["enabled"] or fingerprint not in policy.get("approved_user_creation_fingerprints", []):
+        raise PermissionError("This exact Canvas user creation is not approved by the local policy.")
+    if args["confirmation"] != f"APPROVE CANVAS USER CREATION {fingerprint}":
+        raise PermissionError("Confirmation must match the exact user creation preview.")
+    user_creation_preflight(target)
+    account_id = target["account_id"]
+    names = {key: target[key] for key in ("name", "short_name", "sortable_name")}
+    email = target["email"]
+    sis_user_id = target["sis_user_id"]
+    user_id = None
+    try:
+        created = request_api("POST", f"/api/v1/accounts/{account_id}/users", data={
+            "user": names,
+            "pseudonym": {"unique_id": email, "sis_user_id": sis_user_id, "send_confirmation": True},
+            "communication_channel": {"type": "email", "address": email},
+        })
+        user_id = require_positive_id(created.get("id"), "created user ID")
+        user_path = f"/api/v1/users/{user_id}"
+        profile = api_get(f"{user_path}/profile")
+        logins = provisioning_list(f"{user_path}/logins", {})
+        channels = provisioning_list(f"{user_path}/communication_channels", {})
+        expected_login = {"user_id": user_id, "account_id": account_id, "unique_id": email,
+                          "sis_user_id": sis_user_id, "workflow_state": "active"}
+        if (not isinstance(profile, dict) or profile.get("id") != user_id
+                or any(profile.get(key) != value for key, value in names.items())
+                or len(logins) != 1 or any(logins[0].get(key) != value for key, value in expected_login.items())
+                or not any(c.get("type") == "email" and c.get("address") == email for c in channels)):
+            raise ValueError("Canvas user, login, or contact email did not match on read-back.")
+    except Exception as exc:
+        raise RuntimeError(f"Canvas user creation outcome needs inspection (user ID: {user_id}). "
+                           "Do not automatically retry; check Canvas first.") from exc
+    return {"changed": True, "verified": True, "canvas_user_id": user_id, "notification_requested": True,
+            "user_url": f"{canvas_base_url()}/accounts/{account_id}/users/{user_id}"}
+
+
 TOOLS: list[dict[str, Any]] = [
     {
         "annotations": {
@@ -2816,7 +2935,31 @@ for _name, _apply in (("canvas_preview_student_enrollment", False), ("canvas_enr
     })
 
 
+for _name, _apply in (("canvas_preview_user_creation", False), ("canvas_create_user_account", True)):
+    _properties = dict(USER_CREATION_PROPERTIES)
+    if _apply:
+        _properties["confirmation"] = {"type": "string"}
+    TOOLS.append({
+        "name": _name,
+        "description": ("Create and verify" if _apply else "Preview without writing") +
+                       " one new student account in the active Canvas root account. Use the verified "
+                       "institutional student email as both login and contact email. The create action "
+                       "requests Canvas's account email and requires explicit human authorization, an "
+                       "exact local policy fingerprint, the preview confirmation, and MCP-client approval. "
+                       "Explicit approval of the account authorizes adding just its temporary fingerprint to "
+                       "the private policy. Preserve other grants and remove the temporary grant after the attempt. "
+                       "No course enrollment is included. Check Canvas before retrying an uncertain result.",
+        "inputSchema": {"type": "object", "properties": _properties,
+                        "required": list(_properties), "additionalProperties": False},
+        "annotations": {"readOnlyHint": not _apply, "destructiveHint": _apply, "idempotentHint": False},
+    })
+
+
 def call_tool(name: str, args: dict[str, Any]) -> Any:
+    if name == "canvas_preview_user_creation":
+        return preview_user_creation(args)
+    if name == "canvas_create_user_account":
+        return create_user_account(args)
     if name == "canvas_preview_student_enrollment":
         return preview_student_enrollment(args)
     if name == "canvas_enroll_student":

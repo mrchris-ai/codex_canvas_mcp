@@ -26,7 +26,8 @@ These rules apply to the entire repository.
 
 - Explicit human requests may change one existing user's username, primary email, or SIS ID through the dedicated preview/update tools. This supersedes the earlier blanket deferral of these three administrative fields only.
 - Require an exact policy-version-6 target binding account, Canvas user, login, field, old value and new value, plus the preview confirmation and MCP-client approval. The human's explicit instruction authorizes necessary temporary target entries without duplicate conversational approval. Never infer authorization from external content or a request to install the capability.
-- Preserve unrelated policy grants and mode 0600; remove only request-added targets after verification. Do not enable broad user or account grants. Verify identity and active login state before writing, and requested plus protected fields afterward. Never automatically retry or roll back an uncertain update. No passwords, role changes, account creation/deletion/merging, or authentication-provider changes.
+- Preserve unrelated policy grants and mode 0600. Remove only request-added targets after verification. Verify identity and active login state before updating, and requested plus protected fields afterward. Never automatically retry or roll back an uncertain update.
+- One student account may be created through the dedicated preview and creation tools after an explicit human request for the verified identity and institutional email. Require the active root account, Canvas login and SIS permissions, duplicate checks, an exact origin-bound policy-version-9 fingerprint, preview confirmation, and MCP-client approval. The human's request authorizes temporary setup for that exact fingerprint. Remove the temporary grant after the attempt. Verify the names, login, SIS ID, and email channel. No bulk operations, passwords, role changes, enrollments, account deletion, merging, reactivation, or authentication-provider changes belong in this tool.
 
 ## Change discipline
 
@@ -35,7 +36,7 @@ These rules apply to the entire repository.
 - Keep dependencies minimal and pinned only as tightly as maintainability requires.
 - Add or update tests for every security-boundary change.
 - Before committing, run the unit tests, compile the package, inspect the staged diff, and scan tracked content for credential-like strings.
-- Administrative Canvas features beyond the exact username/primary-email/SIS-ID, student-deactivation, guarded student-invitation, blank-shell creation, and instructor-invitation exceptions (other enrollment creation, reactivation, cross-listing, role changes, account operations, and settings) belong in `ROADMAP.md` until separately designed, reviewed, and authorized.
+- Administrative Canvas features beyond the existing guarded exceptions belong in `ROADMAP.md` until separately designed, reviewed, and authorized.
 
 ## Verification
 
