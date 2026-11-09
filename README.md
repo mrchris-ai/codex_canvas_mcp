@@ -170,7 +170,7 @@ args = ["-m", "canvas_mcp", "--connection-config", "/absolute/private/path/canva
 
 The loader fills missing connection metadata. Matching environment settings are preserved; conflicting values, invalid origins, duplicate keys, and unknown fields fail startup without echoing configuration values. `CANVAS_BASE_URL` is required in the file. The only other accepted keys are the five lookup settings in the example.
 
-The file cannot set write policy, upload roots, arbitrary environment variables, or credentials. Preserve any existing MCP environment configuration for clients that support it. A client with no write policy remains unable to write; an existing independently configured policy is unchanged. The credential helper executables must still be available on the host's `PATH`.
+The file cannot set write policy, upload roots, arbitrary environment variables, or credentials. Preserve any existing MCP environment configuration for clients that support it. A client with no separately provisioned write policy remains unable to write; an existing independently configured policy is unchanged. The credential helper executables must still be available on the host's `PATH`.
 
 For existing clients that cache the old command arguments, the server also checks `~/.config/canvas-mcp/connection.json` when no explicit file argument is supplied and `CANVAS_BASE_URL` is missing or empty. This optional default uses the same strict private-file validation. A missing default leaves the original environment-only behavior unchanged; an unsafe default fails startup. An explicitly specified file never falls back, and a client with an existing base URL does not consult the default.
 
@@ -193,7 +193,15 @@ Keep writing off unless a specific task requires it.
 6. For each content write, review the exact target and payload and honor MCP-client approval controls. For page edits already authorized by the human, the agent supplies the action-specific confirmation field; do not ask the human to repeat a literal phrase for each page or batch.
 7. Disable the policy again when the task is complete.
 
-If the variable is absent, the file is missing, permissions are broader than `0600`, writing is disabled, or the course is not allowlisted, the server refuses the write.
+### Work clients that omit the write-policy environment value
+
+Version 0.18.2 also checks `~/.config/canvas-mcp/write-policy.json` when `CANVAS_WRITE_POLICY` is absent or blank. This is a **separate, explicitly provisioned write policy**, not connection metadata. Nothing creates or enables it automatically. Use the same policy schema and exact task-authorized grants described above; keep private policy files outside Git.
+
+An explicit `CANVAS_WRITE_POLICY` path always takes precedence, even if its file is missing or invalid. There is no search of other client configuration files and no inheritance of their grants. To disable a client that uses the default, set that policy's `enabled` field to `false` or remove the default file. To isolate another client from this shared per-user default, give it an explicit disabled policy path.
+
+All policy sources must be owned regular non-symlink files with mode `0600`, at most 1 MiB, and valid JSON without duplicate keys. Unsafe files fail closed. An absent policy remains disabled. Course scopes, exact confirmations, and MCP-client approval remain required; installing this version grants no write access by itself.
+
+After installing this version, reconnect the active MCP once. Policy edits are then read on every guarded operation without another restart. Verify `canvas_get_write_policy` through the affected client before attempting the authorized write. Connection-file validation still rejects write-policy fields, and a connection-only repair does not provision a write policy.
 
 ### Creating a shell and inviting an instructor
 

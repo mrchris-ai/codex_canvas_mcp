@@ -14,6 +14,9 @@ class ConnectionConfigTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        home = patch.object(Path, "home", return_value=Path(self.temp.name))
+        home.start()
+        self.addCleanup(home.stop)
         self.path = Path(self.temp.name) / "connection.json"
         self.environment = patch.dict(os.environ, {}, clear=True)
         self.environment.start()
