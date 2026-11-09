@@ -137,9 +137,42 @@ Prerequisites: Python 3.11 or newer, the [1Password CLI](https://developer.1pass
 
 ## ChatGPT compatibility
 
-This repository implements a local stdio MCP server for Codex and other clients that support local stdio MCP. Current ChatGPT custom apps do not connect directly to a local stdio server. OpenAI's current guidance is to expose a private local MCP through Secure MCP Tunnel (or deploy a reviewed remote MCP endpoint), subject to plan and workspace-admin availability. Do not expose this process directly to the public internet.
+This repository implements a local stdio MCP server for Codex and other clients that support local stdio MCP, including desktop Work configurations that provide a local executor. A hosted ChatGPT custom app requires a supported private tunnel or a reviewed remote MCP endpoint. Do not expose this process directly to the public internet.
 
 See [Developer mode and MCP apps in ChatGPT](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt) before attempting ChatGPT setup; availability and approval behavior can change.
+
+### Clients that omit configured environment values
+
+Some desktop Work launch paths transfer the names from an MCP server's `env` table as `env_vars` to inherit, without transferring the values. The server can therefore report `CANVAS_BASE_URL` missing even when the saved MCP configuration contains it. A separate terminal or Codex session succeeding does not verify that Work's active MCP has the same configuration.
+
+For this launch path, explicitly provide a private connection JSON file:
+
+```json
+{
+  "CANVAS_BASE_URL": "https://school.instructure.com",
+  "CANVAS_OP_VAULT": "your-vault",
+  "CANVAS_OP_ITEM": "your-item",
+  "CANVAS_OP_FIELD": "credential",
+  "CANVAS_KEYCHAIN_SERVICE": "your-service-label",
+  "CANVAS_KEYCHAIN_ACCOUNT": "your-account-label"
+}
+```
+
+Keep this file outside the repository. It must be a regular, non-symlink file owned by the current user, with permissions `0600`, and no larger than 16 KiB. Set those permissions before adding your lookup references. It contains connection metadata only: never put a Canvas token or a 1Password service-account token in it. Credentials still come from the existing Keychain/1Password lookup flow. The file option requires a platform supporting ownership and no-follow file checks, such as macOS or Linux.
+
+Add the absolute file path to the saved MCP arguments:
+
+```toml
+[mcp_servers.canvas]
+command = "/absolute/path/to/codex_canvas_mcp/.venv/bin/python"
+args = ["-m", "canvas_mcp", "--connection-config", "/absolute/private/path/canvas-connection.json"]
+```
+
+The loader fills missing connection metadata. Matching environment settings are preserved; conflicting values, invalid origins, duplicate keys, and unknown fields fail startup without echoing configuration values. `CANVAS_BASE_URL` is required in the file. The only other accepted keys are the five lookup settings in the example.
+
+The file cannot set write policy, upload roots, arbitrary environment variables, or credentials. Preserve any existing MCP environment configuration for clients that support it. A client with no write policy remains unable to write; an existing independently configured policy is unchanged. The credential helper executables must still be available on the host's `PATH`.
+
+After changing the arguments, reload the connector in the affected client and verify a real read through its active MCP. Also inspect `canvas_get_write_policy` to confirm the connection repair has not changed write access.
 
 ## Enabling content-authoring tools
 
