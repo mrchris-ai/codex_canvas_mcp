@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from canvas_mcp.connection_config import ConnectionConfigError, load_connection_config
+from canvas_mcp.connection_config import ConnectionConfigError, configure_connection, load_connection_config
 from canvas_mcp import server
 
 
@@ -126,3 +126,39 @@ class ConnectionConfigTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         self.assertNotIn("fake-private-value", error.getvalue())
         self.assertEqual(output.getvalue(), "")
+
+    def test_cached_launch_without_arguments_uses_private_default_only_if_base_missing(self):
+        default = Path(self.temp.name) / ".config" / "canvas-mcp" / "connection.json"
+        default.parent.mkdir(parents=True)
+        self.path = default
+        self.write_config({"CANVAS_BASE_URL": "https://school.example"})
+        with patch("canvas_mcp.connection_config.Path.home", return_value=Path(self.temp.name)):
+            with patch("sys.argv", ["canvas_mcp"]), patch("sys.stdin", io.StringIO("")):
+                server.main()
+            self.assertEqual(server.canvas_base_url(), "https://school.example")
+            os.environ["CANVAS_BASE_URL"] = "https://configured.example"
+            configure_connection(None)
+            self.assertEqual(server.canvas_base_url(), "https://configured.example")
+        self.assertFalse(server.write_policy()["enabled"])
+
+    def test_default_missing_is_unchanged_and_unsafe_default_fails_closed(self):
+        with patch("canvas_mcp.connection_config.Path.home", return_value=Path(self.temp.name)):
+            configure_connection(None)
+            self.assertEqual(dict(os.environ), {})
+            default = Path(self.temp.name) / ".config" / "canvas-mcp" / "connection.json"
+            default.parent.mkdir(parents=True)
+            default.symlink_to(default.with_name("missing.json"))
+            with self.assertRaises(ConnectionConfigError):
+                configure_connection(None)
+
+    def test_explicit_missing_file_never_falls_back(self):
+        with patch("canvas_mcp.connection_config.Path.home") as home:
+            with self.assertRaises(ConnectionConfigError):
+                configure_connection(str(self.path))
+            home.assert_not_called()
+
+    def test_inaccessible_default_fails_closed(self):
+        with patch("canvas_mcp.connection_config.Path.home", return_value=Path(self.temp.name)), \
+                patch("canvas_mcp.connection_config.Path.lstat", side_effect=PermissionError):
+            with self.assertRaises(ConnectionConfigError):
+                configure_connection(None)

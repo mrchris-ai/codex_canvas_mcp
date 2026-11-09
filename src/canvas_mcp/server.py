@@ -3196,7 +3196,7 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def main() -> None:
-    from canvas_mcp.connection_config import ConnectionConfigError, load_connection_config
+    from canvas_mcp.connection_config import ConnectionConfigError, configure_connection
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -3204,11 +3204,10 @@ def main() -> None:
         help="Private connection metadata file; cannot supply tokens or write permissions.",
     )
     args = parser.parse_args()
-    if args.connection_config:
-        try:
-            load_connection_config(args.connection_config)
-        except ConnectionConfigError as exc:
-            parser.exit(2, f"Connection configuration error: {exc}\n")
+    try:
+        configure_connection(args.connection_config)
+    except ConnectionConfigError as exc:
+        parser.exit(2, f"Connection configuration error: {exc}\n")
     for line in sys.stdin:
         ident: Any = None
         try:

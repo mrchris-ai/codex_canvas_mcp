@@ -20,6 +20,21 @@ class ConnectionConfigError(ValueError):
     """A connection file is unsafe or conflicts with the process environment."""
 
 
+def configure_connection(explicit_path: str | None) -> None:
+    """Support cached launch arguments without overriding configured clients."""
+    if explicit_path is not None:
+        load_connection_config(explicit_path)
+    elif not os.environ.get("CANVAS_BASE_URL", "").strip():
+        path = Path.home() / ".config" / "canvas-mcp" / "connection.json"
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise ConnectionConfigError("Cannot inspect default connection configuration.") from exc
+        load_connection_config(str(path))
+
+
 def _origin(value: str) -> str:
     value = value.rstrip("/")
     try:

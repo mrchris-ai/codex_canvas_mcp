@@ -172,6 +172,8 @@ The loader fills missing connection metadata. Matching environment settings are 
 
 The file cannot set write policy, upload roots, arbitrary environment variables, or credentials. Preserve any existing MCP environment configuration for clients that support it. A client with no write policy remains unable to write; an existing independently configured policy is unchanged. The credential helper executables must still be available on the host's `PATH`.
 
+For existing clients that cache the old command arguments, the server also checks `~/.config/canvas-mcp/connection.json` when no explicit file argument is supplied and `CANVAS_BASE_URL` is missing or empty. This optional default uses the same strict private-file validation. A missing default leaves the original environment-only behavior unchanged; an unsafe default fails startup. An explicitly specified file never falls back, and a client with an existing base URL does not consult the default.
+
 After changing the arguments, reload the connector in the affected client and verify a real read through its active MCP. Also inspect `canvas_get_write_policy` to confirm the connection repair has not changed write access.
 
 ## Enabling content-authoring tools
