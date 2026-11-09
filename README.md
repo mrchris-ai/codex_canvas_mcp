@@ -44,6 +44,8 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_create_course_shell` | Create and verify a private unpublished shell | Blocked |
 | `canvas_preview_instructor_enrollment` | Verify an existing instructor identity, section, and role | Available |
 | `canvas_enroll_instructor` | Invite and verify one instructor with an approved teacher role | Blocked |
+| `canvas_preview_student_enrollment` | Verify one student's identity, course, section, role, and existing enrollment | Available |
+| `canvas_enroll_student` | Invite and verify one exact student after an explicit request | Blocked |
 | `canvas_preview_student_deactivation` | Read one exact student enrollment and preview deactivation | Available |
 | `canvas_deactivate_student_enrollment` | Deactivate and verify one active student enrollment | Blocked |
 | `canvas_upload_powerpoint` | Upload one validated macro-free PPTX from its trusted folder | Blocked |
@@ -189,7 +191,7 @@ A changed name, code, term, campus, instructor, section, or role requires its ow
 
 ### Deactivating one student enrollment
 
-First confirm the official enrollment disposition outside Canvas. Use `canvas_preview_student_deactivation` with the course ID, section ID, enrollment ID, Canvas user ID, and SIS user ID. It shows the live state and makes no change. The mutation accepts the same exact IDs plus `APPROVE CANVAS STUDENT DEACTIVATION course <course_id> enrollment <enrollment_id>` after human authorization and MCP-client approval. The local policy must be version 3, 4, 5, or 6 and the course must appear in `approved_student_deactivation_course_ids`; version 1 and 2 policies remain readable but grant no deactivation access. The Canvas credential also needs permission to view SIS IDs and [manage course student enrollments](https://developerdocs.instructure.com/services/canvas/permissions/details/file.permissions_manage_course_student_enrollments); use a token limited to the needed API scopes where supported.
+First confirm the official enrollment disposition outside Canvas. Use `canvas_preview_student_deactivation` with the course ID, section ID, enrollment ID, Canvas user ID, and SIS user ID. It shows the live state and makes no change. The mutation accepts the same exact IDs plus `APPROVE CANVAS STUDENT DEACTIVATION course <course_id> enrollment <enrollment_id>` after human authorization and MCP-client approval. The local policy must be version 3 or later and the course must appear in `approved_student_deactivation_course_ids`; version 1 and 2 policies remain readable but grant no deactivation access. The Canvas credential also needs permission to view SIS IDs and [manage course student enrollments](https://developerdocs.instructure.com/services/canvas/permissions/details/file.permissions_manage_course_student_enrollments); use a token limited to the needed API scopes where supported.
 
 The tool refuses a mismatched identity or a non-active enrollment, sends only Canvas's `task=deactivate` action to the exact enrollment, and confirms the resulting inactive state through a second read. An already inactive enrollment returns a verified no-change result. If verification fails after the request, inspect the Canvas roster before retrying. Canvas's [Enrollments API](https://developerdocs.instructure.com/services/canvas/resources/enrollments) documents deactivation as distinct from deletion; restoring access requires a separately authorized reactivation action, which this connector does not provide.
 
@@ -246,6 +248,10 @@ Tests mock network and credential boundaries. See `AGENTS.md` for invariants con
 Use `canvas_preview_user_update` followed by `canvas_update_user_account` for explicitly requested changes to one existing user. Policy version 6 adds `approved_user_update_targets`; each grant binds the exact account/user/login, field, current value, and replacement value. An explicit human request authorizes the temporary target entry without another conversational confirmation. The server still honors local policy and MCP-client approval. Existing policies remain readable; their user-update list defaults to empty.
 
 Install the new source and reconnect the client once for tool discovery. Future requests only need the temporary exact target in the private policy, removed after verification. A username change does not automatically change email or SIS ID. See [contract, authorization, recovery, and API references](docs/2026-10-28-user-account-updates.md).
+
+## Guarded student invitation (0.17.1)
+
+`canvas_preview_student_enrollment` checks the exact Canvas user, SIS user, SIS course, section, and built-in StudentEnrollment role. After an explicit human request for that student and course, `canvas_enroll_student` requires the preview confirmation, an enabled local write policy, and MCP-client approval. No per-student policy entry is needed. The request binds `course_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `sis_course_id`, and `role_id`. An identical active or invited enrollment returns a verified no-op. One deleted enrollment with all six target fields matching can be re-enrolled; any other conflicting enrollment blocks the write. A new invitation notifies the student and is read back, allowing Canvas either to revive the deleted record or to retain it alongside one matching live record. An uncertain result must be inspected before any retry. Policy version 8 omits `approved_student_enrollment_targets`; older policies remain readable, but version 7 entries no longer authorize or restrict student invitations.
 
 ## API-first workflow
 
