@@ -46,6 +46,7 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_enroll_instructor` | Invite and verify one instructor with an approved teacher role | Blocked |
 | `canvas_preview_student_deactivation` | Read one exact student enrollment and preview deactivation | Available |
 | `canvas_deactivate_student_enrollment` | Deactivate and verify one active student enrollment | Blocked |
+| `canvas_upload_powerpoint` | Upload one validated macro-free PPTX from its trusted folder | Blocked |
 | `canvas_upload_image` | Upload one verified image from the configured trusted folder | Blocked |
 | `canvas_write_page` | Create or update one page | Blocked |
 | `canvas_update_syllabus` | Preview, replace, and verify only a course syllabus body | Blocked |
@@ -206,6 +207,14 @@ The syllabus tool requires the exact course allowlist, `APPROVE CANVAS SYLLABUS 
 
 To restore a saved syllabus, review the live version, compute its current hash, and submit the saved body through the same guarded tool. The tool never publishes a course or syncs a Blueprint.
 
+### Enabling PowerPoint upload (0.16.0)
+
+Set `CANVAS_POWERPOINT_UPLOAD_ROOT` to an absolute, current-user-owned folder containing reviewed `.pptx` files. Restart or reconnect existing MCP clients to discover `canvas_upload_powerpoint`. The tool uses the enabled local write policy's exact course allowlist and requires `APPROVE CANVAS POWERPOINT UPLOAD WRITE course <course_id>` after explicit human authorization. Enabling this tool does not authorize uploading unrelated files.
+
+Only standard macro-free `.pptx` packages up to 25 MiB are accepted. Legacy `.ppt`, `.pptm`, arbitrary ZIP files, symlinks, unsafe filenames, encrypted entries, VBA and ActiveX content are rejected. Validation checks the package content type, presentation XML, and root office-document relationship; bounds expanded content and XML metadata; and freezes the validated bytes before any network write. This validates the package format, not the accuracy or safety of every slide's content.
+
+Uploads use the existing authenticated Canvas initialization and token-free HTTPS multipart storage exchange. Completion uses a same-origin authenticated GET as specified in the [Canvas file upload documentation](https://developerdocs.instructure.com/services/canvas/basics/file.file_uploads). A course-scoped read verifies the file ID, MIME type and size before returning a stable course download URL and the local payload SHA-256. Existing filenames are renamed, never overwritten. If an upload outcome is uncertain, inspect course Files before attempting another upload. No automatic retries or page-publication changes occur.
+
 ### Enabling image upload
 
 Image upload uses the same local write policy and exact course allowlist, plus `CANVAS_IMAGE_UPLOAD_ROOT`. The tool refuses relative paths, symlinks, files outside that root, files not owned by the current user, unsupported image types, files whose binary signature disagrees with the extension, and files larger than 10 MiB. The exact confirmation is `APPROVE CANVAS IMAGE UPLOAD course <course_id>`.
@@ -215,7 +224,7 @@ Canvas uses a documented three-step upload exchange: initialize the course file 
 
 ## Current authoring boundary
 
-This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its only local-file capability is the payload-gated image uploader described above. Guarded student deactivation, blank-shell creation, and instructor invitations are supported. Generic file upload, New Quizzes, other enrollment changes, cross-listing, template copying, and broader account/course administration remain unsupported.
+This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its local-file capabilities are the payload-gated image and PowerPoint uploaders described above. Guarded student deactivation, blank-shell creation, and instructor invitations are supported. Generic file upload, New Quizzes, other enrollment changes, cross-listing, template copying, and broader account/course administration remain unsupported.
 
 See [`docs/2026-08-06-content-authoring-extension.md`](docs/2026-08-06-content-authoring-extension.md) for the implementation and end-to-end validation record.
 See [`docs/2026-08-16-image-upload-extension.md`](docs/2026-08-16-image-upload-extension.md) for the image-upload threat model and validation record.
