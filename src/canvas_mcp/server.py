@@ -7,6 +7,7 @@ repository files, included in tool output, or logged.
 
 from __future__ import annotations
 
+import argparse
 import json
 import io
 import stat
@@ -31,7 +32,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.18.0"
+SERVER_VERSION = "0.18.1"
 PROTOCOL_VERSION = "2025-03-26"
 PROVISIONING_AUTHORIZATION_GUIDANCE = (
     "Carry forward the human's authorization for the exact provisioning task. "
@@ -3195,6 +3196,18 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def main() -> None:
+    from canvas_mcp.connection_config import ConnectionConfigError, configure_connection
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--connection-config", metavar="ABSOLUTE_JSON_PATH",
+        help="Private connection metadata file; cannot supply tokens or write permissions.",
+    )
+    args = parser.parse_args()
+    try:
+        configure_connection(args.connection_config)
+    except ConnectionConfigError as exc:
+        parser.exit(2, f"Connection configuration error: {exc}\n")
     for line in sys.stdin:
         ident: Any = None
         try:
