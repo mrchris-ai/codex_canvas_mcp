@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "enabled": false,
   "approved_course_ids": [],
   "approved_rubric_delete_course_ids": [],
@@ -8,5 +8,6 @@
   "approved_instructor_enrollment_course_ids": [],
   "approved_instructor_role_ids": [],
   "approved_course_creation_targets": [],
-  "approved_instructor_enrollment_targets": []
+  "approved_instructor_enrollment_targets": [],
+  "approved_user_update_targets": []
 }

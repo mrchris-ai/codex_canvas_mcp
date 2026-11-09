@@ -345,7 +345,7 @@ class ProvisioningPolicyTests(unittest.TestCase):
                         policy.update(approved_course_creation_targets=[], approved_instructor_enrollment_targets=[])
                     path.write_text(json.dumps(policy))
                     result=server.write_policy()
-                    self.assertEqual(result["version"],5)
+                    self.assertEqual(result["version"],6)
                     for key in keys: self.assertEqual(result[key],[123] if version>=4 else [])
                 for key in keys:
                     for bad in ([True],[0],[-1],[1,1],"1",None):
