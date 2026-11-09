@@ -32,7 +32,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.18.1"
+SERVER_VERSION = "0.18.2"
 PROTOCOL_VERSION = "2025-03-26"
 PROVISIONING_AUTHORIZATION_GUIDANCE = (
     "Carry forward the human's authorization for the exact provisioning task. "
@@ -228,22 +228,47 @@ def disabled_policy() -> dict[str, Any]:
     }
 
 
+MAX_WRITE_POLICY_BYTES = 1024 * 1024
+
+
+def _unique_policy_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ConfigurationError("The Canvas write policy contains duplicate keys.")
+        result[key] = value
+    return result
+
+
 def write_policy() -> dict[str, Any]:
+    # A separately provisioned private default supports clients that drop env values.
+    # An explicit environment path always wins, including when it is missing.
     configured_path = os.environ.get("CANVAS_WRITE_POLICY", "").strip()
-    if not configured_path:
-        return disabled_policy()
-    path = Path(configured_path).expanduser()
+    path = (Path(configured_path).expanduser() if configured_path else
+            Path.home() / ".config" / "canvas-mcp" / "write-policy.json")
     try:
-        stat = path.stat()
+        path.lstat()
     except FileNotFoundError:
         return disabled_policy()
-    if hasattr(os, "getuid") and stat.st_uid != os.getuid():
-        raise ConfigurationError("The Canvas write policy must be owned by the current user.")
-    if stat.st_mode & 0o077:
-        raise ConfigurationError("The Canvas write policy must have file mode 0600.")
+    except OSError as exc:
+        raise ConfigurationError("Cannot inspect the Canvas write policy.") from exc
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "getuid"):
+        raise ConfigurationError("Private Canvas write policies are unsupported on this platform.")
     try:
-        policy = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600):
+                raise ConfigurationError("The Canvas write policy must be an owned regular file with mode 0600.")
+            raw = stream.read(MAX_WRITE_POLICY_BYTES + 1)
+    except OSError as exc:
+        raise ConfigurationError("Cannot securely open the Canvas write policy.") from exc
+    if len(raw) > MAX_WRITE_POLICY_BYTES:
+        raise ConfigurationError("The Canvas write policy exceeds its size limit.")
+    try:
+        policy = json.loads(raw, object_pairs_hook=_unique_policy_keys)
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise ConfigurationError("The Canvas write policy is unreadable or invalid JSON.") from exc
     if not isinstance(policy, dict):
         raise ConfigurationError("The Canvas write policy must be a JSON object.")

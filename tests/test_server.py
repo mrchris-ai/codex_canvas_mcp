@@ -54,7 +54,9 @@ def write_sample_png(path: Path) -> None:
 
 class ServerSafetyTests(unittest.TestCase):
     def test_write_is_disabled_without_policy_path(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(server.Path, "home", return_value=Path(directory)), \
+                mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(server.write_policy(), server.disabled_policy())
             with self.assertRaises(PermissionError):
                 server.require_write_approval(123, "APPROVE CANVAS PAGE WRITE course 123", "PAGE")
