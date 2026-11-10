@@ -24,6 +24,13 @@ These rules apply to the entire repository.
 - Do not ship an enabled policy or a real course ID. Example policy files must remain disabled with an empty allowlist.
 - Do not weaken TLS validation or credential subprocess isolation.
 
+## Authorized SIS enrollment import exception
+
+- An explicit human request for traditional SIS enrollment import authorizes only the named students and exact course/section. Use the dedicated preview, submit, and verify tools, capped at 25 students in one course section. Generated enrollment-only CSV may set built-in students active, with notifications disabled. No arbitrary input files, full batch/diff mode, overrides, user/course/section creation, deletions, invitation activation, or inactive/completed reactivation.
+- Require policy version 10's separate exact origin/target fingerprint, preview confirmation bound to the generated CSV, and MCP-client approval. The approved task includes the necessary temporary fingerprint entry without duplicate conversational approval. Preserve all other policy settings and mode 0600; remove only the request-added grant after the attempt.
+- Recheck SIS and Canvas identities, course/root/section, role, and existing enrollment before submission. Return a pending import ID rather than claiming enrollment success. Verify import completion/counts/errors and exact active enrollments with SIS import provenance.
+- Reserve a private local submission receipt before POST. Preserve it on failure or uncertainty and never automatically resubmit or erase it. No credentials or production receipts belong in Git. Tests must mock all credential and network access.
+
 ## Authorized user-account exception
 
 - Explicit human requests may change one existing user's username, primary email, or SIS ID through the dedicated preview/update tools. This supersedes the earlier blanket deferral of these three administrative fields only.

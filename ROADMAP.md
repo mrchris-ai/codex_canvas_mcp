@@ -34,6 +34,7 @@ Each future feature needs its own narrow tool contract, least-privilege credenti
 - Resolve identities without exposing unnecessary profile data.
 - One exact instructor invitation is implemented for an existing Canvas/SIS identity and an approved TeacherEnrollment role. Existing conflicts are refused.
 - Broad student enrollment creation, reactivation, role changes, removals, and broader invitations remain deferred. A guarded exact student invitation is implemented.
+- Bounded enrollment-only SIS imports are implemented for explicitly approved batches of at most 25 students in one exact course section. Arbitrary SIS files, bulk/full-term sync, batch/diff mode, invitation activation, inactive/completed reactivation, and SIS account/course creation remain deferred.
 - Require role and course constraints in local policy.
 
 ### Maintenance

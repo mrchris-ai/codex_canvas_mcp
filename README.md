@@ -45,6 +45,9 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_preview_instructor_enrollment` | Verify an existing instructor identity, section, and role | Available |
 | `canvas_enroll_instructor` | Invite and verify one instructor with an approved teacher role | Blocked |
 | `canvas_preview_student_enrollment` | Verify one student's identity, course, section, role, and existing enrollment | Available |
+| `canvas_preview_sis_enrollment_import` | Preview generated CSV for up to 25 students in one exact course section | Available |
+| `canvas_submit_sis_enrollment_import` | Submit one approved enrollment-only SIS import | Blocked |
+| `canvas_verify_sis_enrollment_import` | Verify the recorded import and its active enrollments | Available |
 | `canvas_enroll_student` | Invite and verify one exact student after an explicit request | Blocked |
 | `canvas_preview_student_deactivation` | Read one exact student enrollment and preview deactivation | Available |
 | `canvas_deactivate_student_enrollment` | Deactivate and verify one active student enrollment | Blocked |
@@ -286,7 +289,7 @@ Canvas uses a documented three-step upload exchange: initialize the course file 
 
 ## Current authoring boundary
 
-This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its local-file capabilities are the payload-gated image and PowerPoint uploaders described above. Guarded student deactivation, blank-shell creation, and instructor invitations are supported. Generic file upload, New Quizzes, other enrollment changes, cross-listing, template copying, and broader account/course administration remain unsupported.
+This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its local-file capabilities are the payload-gated image and PowerPoint uploaders described above. Guarded student deactivation, student/instructor invitations, enrollment-only SIS imports, and blank-shell creation are supported. Generic file upload, New Quizzes, other enrollment changes, cross-listing, template copying, and broader account/course administration remain unsupported.
 
 See [`docs/2026-08-06-content-authoring-extension.md`](docs/2026-08-06-content-authoring-extension.md) for the implementation and end-to-end validation record.
 See [`docs/2026-08-16-image-upload-extension.md`](docs/2026-08-16-image-upload-extension.md) for the image-upload threat model and validation record.
@@ -312,6 +315,19 @@ Install the new source and reconnect the client once for tool discovery. Future 
 ## Guarded student invitation (0.17.1)
 
 `canvas_preview_student_enrollment` checks the exact Canvas user, SIS user, SIS course, section, and built-in StudentEnrollment role. After an explicit human request for that student and course, `canvas_enroll_student` requires the preview confirmation, an enabled local write policy, and MCP-client approval. No per-student policy entry is needed. The request binds `course_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `sis_course_id`, and `role_id`. An identical active or invited enrollment returns a verified no-op. One deleted enrollment with all six target fields matching can be re-enrolled; any other conflicting enrollment blocks the write. A new invitation notifies the student and is read back, allowing Canvas either to revive the deleted record or to retain it alongside one matching live record. An uncertain result must be inspected before any retry. Policy version 8 omits `approved_student_enrollment_targets`; older policies remain readable, but version 7 entries no longer authorize or restrict student invitations.
+
+## Guarded SIS enrollment imports (0.19.0)
+
+Use the three SIS enrollment import tools when the human explicitly requests traditional SIS enrollment creation. These are separate from the regular invitation tools. They generate a UTF-8 `enrollments.csv` for 1 to 25 verified students in one exact SIS course section, using `student`, `active`, and `notify=false`. They accept no file path, arbitrary CSV, deletion, batch/diff mode, override, or account/course-creation options.
+
+1. Call `canvas_preview_sis_enrollment_import` with `account_id` (the root), `course_id`, `section_id`, `sis_course_id`, `sis_section_id`, built-in student `role_id`, and `students` containing exact `canvas_user_id` / `sis_user_id` pairs. Keep SIS IDs as strings, including leading zeros. A null `sis_section_id` is allowed only for the course's sole section. The preview verifies root account, SIS permission, course/section identities, SIS resolution, built-in role, and existing enrollments, and returns the generated CSV.
+2. With explicit human approval of those students and that course, migrate the private policy to version 10 and add only the preview's `approval_fingerprint` to `approved_sis_enrollment_import_fingerprints`. Preserve other grants, the enabled state, and mode `0600`. Versions 1 through 9 remain readable and grant no SIS import access. Installation alone does not enable this administrative operation.
+3. Submit the exact target with the preview's `confirmation` through `canvas_submit_sis_enrollment_import` under MCP-client approval. An already active exact enrollment is excluded from the CSV. An exact deleted enrollment may be restored. Invitations, inactive/completed enrollments, competing roles/sections, and duplicate IDs block the batch. Submission is asynchronous and is **not** reported as completed enrollment.
+4. Poll `canvas_verify_sis_enrollment_import` with the same target and returned `import_id`. Success requires a clean enrollment-only import with expected row counts and an exact active read-back for every student, including matching `sis_import_id` on imported records. Pending, warnings, failed import, or mismatched results are not success. Remove only the temporary policy fingerprint after the submission attempt; verification does not need a write grant.
+
+The connector reserves a private receipt under `~/.canvas-mcp-sis-imports/` before the POST. The directory is mode `0700` and each receipt is mode `0600`. A repeated target cannot silently submit again, including after a timeout or process crash. Preserve receipts outside Git. If a request returns no import ID, inspect Canvas's import history before any operator-directed recovery. Do not automatically retry, delete receipts, or roll back partially applied imports. A later deliberate repeat of the identical batch requires explicit operator review of its existing receipt.
+
+Reconnect existing MCP clients after installing 0.19.0 to discover the three tools. Existing content and invitation permissions are unchanged. See the [SIS import contract](docs/sis-enrollment-import.md) for scope, API references, and recovery.
 
 ## Guarded student account creation (0.18.0)
 

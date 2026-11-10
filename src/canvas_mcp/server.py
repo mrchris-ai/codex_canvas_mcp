@@ -34,7 +34,7 @@ import certifi
 from canvas_mcp.content_authorization import CONTENT_AUTHORIZATION_GUIDANCE, CONTENT_WRITE_TOOLS
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.18.3"
+SERVER_VERSION = "0.19.0"
 PROTOCOL_VERSION = "2025-03-26"
 PROVISIONING_AUTHORIZATION_GUIDANCE = (
     "Carry forward the human's authorization for the exact provisioning task. "
@@ -215,7 +215,7 @@ def api_get(path: str, query: dict[str, Any] | None = None) -> Any:
 
 def disabled_policy() -> dict[str, Any]:
     return {
-        "version": 9,
+        "version": 10,
         "enabled": False,
         "approved_course_ids": [],
         "approved_rubric_delete_course_ids": [],
@@ -227,6 +227,7 @@ def disabled_policy() -> dict[str, Any]:
         "approved_instructor_enrollment_targets": [],
         "approved_user_update_targets": [],
         "approved_user_creation_fingerprints": [],
+        "approved_sis_enrollment_import_fingerprints": [],
     }
 
 
@@ -276,25 +277,27 @@ def write_policy() -> dict[str, Any]:
         raise ConfigurationError("The Canvas write policy must be a JSON object.")
     version = policy.get("version")
     expected_keys = {"version", "enabled", "approved_course_ids"}
-    if version in {2, 3, 4, 5, 6, 7, 8, 9}:
+    if version in {2, 3, 4, 5, 6, 7, 8, 9, 10}:
         expected_keys.add("approved_rubric_delete_course_ids")
-    if version in {3, 4, 5, 6, 7, 8, 9}:
+    if version in {3, 4, 5, 6, 7, 8, 9, 10}:
         expected_keys.add("approved_student_deactivation_course_ids")
     provision_keys = ("approved_course_creation_account_ids",
                       "approved_instructor_enrollment_course_ids", "approved_instructor_role_ids")
-    if version in {4, 5, 6, 7, 8, 9}:
+    if version in {4, 5, 6, 7, 8, 9, 10}:
         expected_keys.update(provision_keys)
-    if version in {5, 6, 7, 8, 9}:
+    if version in {5, 6, 7, 8, 9, 10}:
         expected_keys.update(("approved_course_creation_targets", "approved_instructor_enrollment_targets"))
-    if version in {6, 7, 8, 9}:
+    if version in {6, 7, 8, 9, 10}:
         expected_keys.add("approved_user_update_targets")
     if version == 7:
         expected_keys.add("approved_student_enrollment_targets")
-    if version == 9:
+    if version in {9, 10}:
         expected_keys.add("approved_user_creation_fingerprints")
+    if version == 10:
+        expected_keys.add("approved_sis_enrollment_import_fingerprints")
     if set(policy) != expected_keys:
         raise ConfigurationError("The Canvas write policy contains unexpected keys.")
-    if type(version) is not int or version not in range(1, 10) or not isinstance(policy["enabled"], bool):
+    if type(version) is not int or version not in range(1, 11) or not isinstance(policy["enabled"], bool):
         raise ConfigurationError("The Canvas write policy has invalid version or enabled values.")
     course_ids = policy["approved_course_ids"]
     if not isinstance(course_ids, list) or any(
@@ -387,11 +390,17 @@ def write_policy() -> dict[str, Any]:
         raise ConfigurationError("User creation approvals must be SHA-256 fingerprints.")
     if len(creation_fingerprints) != len(set(creation_fingerprints)):
         raise ConfigurationError("User creation approvals must not contain duplicates.")
+    sis_fingerprints = policy.get("approved_sis_enrollment_import_fingerprints", [])
+    if (not isinstance(sis_fingerprints, list) or any(
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in sis_fingerprints) or len(sis_fingerprints) != len(set(sis_fingerprints))):
+        raise ConfigurationError("SIS enrollment import approvals must be unique SHA-256 fingerprints.")
     return {
         "approved_user_update_targets": validated_updates,
         "approved_user_creation_fingerprints": creation_fingerprints,
+        "approved_sis_enrollment_import_fingerprints": sis_fingerprints,
         **provision_policy,
-        "version": 9,
+        "version": 10,
         "enabled": policy["enabled"],
         "approved_course_ids": course_ids,
         "approved_rubric_delete_course_ids": rubric_delete_course_ids,
@@ -2983,12 +2992,22 @@ for _name, _apply in (("canvas_preview_user_creation", False), ("canvas_create_u
     })
 
 
+from canvas_mcp import sis_import
+
+TOOLS.extend(sis_import.tools())
+
 for _tool in TOOLS:
     if _tool["name"] in CONTENT_WRITE_TOOLS:
         _tool["description"] += " " + CONTENT_AUTHORIZATION_GUIDANCE
 
 
 def call_tool(name: str, args: dict[str, Any]) -> Any:
+    if name == "canvas_preview_sis_enrollment_import":
+        return sis_import.preview(args)
+    if name == "canvas_submit_sis_enrollment_import":
+        return sis_import.submit(args)
+    if name == "canvas_verify_sis_enrollment_import":
+        return sis_import.verify(args)
     if name == "canvas_preview_user_creation":
         return preview_user_creation(args)
     if name == "canvas_create_user_account":
