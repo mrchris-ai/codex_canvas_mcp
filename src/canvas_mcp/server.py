@@ -31,8 +31,10 @@ import urllib.request
 
 import certifi
 
+from canvas_mcp.content_authorization import CONTENT_AUTHORIZATION_GUIDANCE, CONTENT_WRITE_TOOLS
+
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.18.2"
+SERVER_VERSION = "0.18.3"
 PROTOCOL_VERSION = "2025-03-26"
 PROVISIONING_AUTHORIZATION_GUIDANCE = (
     "Carry forward the human's authorization for the exact provisioning task. "
@@ -2981,6 +2983,11 @@ for _name, _apply in (("canvas_preview_user_creation", False), ("canvas_create_u
     })
 
 
+for _tool in TOOLS:
+    if _tool["name"] in CONTENT_WRITE_TOOLS:
+        _tool["description"] += " " + CONTENT_AUTHORIZATION_GUIDANCE
+
+
 def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "canvas_preview_user_creation":
         return preview_user_creation(args)
@@ -3197,7 +3204,7 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
                 "instructions": (
                     "Canvas reads are available after local credential setup. Content writing and "
                     "image/PowerPoint uploads are disabled unless secure local policy and payload gates enable them. "
-                    "Never reveal credentials. " + API_FIRST_GUIDANCE + PROVISIONING_AUTHORIZATION_GUIDANCE + USER_UPDATE_AUTHORIZATION_GUIDANCE
+                    "Never reveal credentials. " + API_FIRST_GUIDANCE + CONTENT_AUTHORIZATION_GUIDANCE + PROVISIONING_AUTHORIZATION_GUIDANCE + USER_UPDATE_AUTHORIZATION_GUIDANCE
                 ),
             },
         }

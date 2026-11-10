@@ -6,7 +6,7 @@ A portable local MCP server that lets compatible clients read Canvas and, only a
 
 - Canvas reads are available by default after local credential setup.
 - Writing is disabled by default.
-- Every content write requires an enabled local policy, an exact per-course allowlist match, exact confirmation text, and approval in the MCP client.
+- Every content write requires an enabled local policy, an exact per-course allowlist match, an explicit user-directed task, agent-supplied confirmation text, and the applicable MCP-client controls. One task approval carries through its necessary writes; it is not requested again for every tool call.
 - Image upload adds a payload gate: only a locally owned PNG, JPEG, or WebP inside one configured trusted folder, no larger than 10 MiB, can be sent.
 - There is no generic Canvas write tool.
 - Credentials stay in 1Password and, optionally, macOS Keychain. They do not belong in this repository or client configuration.
@@ -178,7 +178,7 @@ After changing the arguments, reload the connector in the affected client and ve
 
 ## Enabling content-authoring tools
 
-Keep writing off unless a specific task requires it.
+Keep writing off until the user approves course-content access. Once a course is persistently approved, retain it for future user-directed tasks.
 
 1. Copy `config/write-policy.example.json` to a location outside the repository.
 2. Add only the exact Canvas course IDs approved for content authoring to `approved_course_ids`. Add courses approved only for zero-dependency rubric deletion to `approved_rubric_delete_course_ids`, and courses approved for student deactivation to `approved_student_deactivation_course_ids`. Each list is independent.
@@ -190,8 +190,25 @@ Keep writing off unless a specific task requires it.
 
 4. Add `CANVAS_WRITE_POLICY=/absolute/private/path/write-policy.json` to the MCP server environment.
 5. Restart the client if the environment variable was added or changed, then call `canvas_get_write_policy` to verify the effective policy. Edits to an already configured policy file are read on each guarded operation and do not require a restart.
-6. For each content write, review the exact target and payload and honor MCP-client approval controls. For page edits already authorized by the human, the agent supplies the action-specific confirmation field; do not ask the human to repeat a literal phrase for each page or batch.
-7. Disable the policy again when the task is complete.
+6. For a listed course, carry the user's task instruction through all necessary content writes within the agreed scope. The agent reviews targets and payloads, supplies technical confirmation fields, and verifies results without repeatedly asking the user. Honor any host-enforced approval decision.
+7. Keep persistent course approval after task completion. Remove it or disable the policy only when the user requests that, including an explicitly temporary grant.
+
+### Avoiding repeated client prompts for approved course content
+
+There are two separate layers: the connector's exact course allowlist and the client's tool approval mode. A client configured with `default_tools_approval_mode = "writes"` can ask on every mutation even after the user approved the task. Connector confirmation strings are supplied by the agent and must not become additional user questions.
+
+With explicit user authorization, configure `approval_mode = "approve"` only for the 21 tools guarded by the general content-course allowlist. Preserve the server default and all administrative settings. Version 0.18.3 includes a narrowly scoped helper:
+
+```bash
+python -m canvas_mcp.content_authorization          # inspect without saving or displaying private settings
+python -m canvas_mcp.content_authorization --apply  # save only content-tool overrides
+```
+
+The helper uses the existing `~/.codex/config.toml` registration, preserves credentials and other configuration, refuses conflicting overrides, saves atomically with mode `0600`, and is idempotent. It does not edit Canvas, enable the write policy, add a course, alter global approval settings, or grant any administrative permission. `--config` selects another private client configuration explicitly. See the [OpenAI configuration reference](https://developers.openai.com/codex/config-reference) for MCP per-tool approval modes.
+
+For an unlisted course, ask once for persistent access and the intended task, then add only that approved ID to the effective private allowlist and verify the resulting policy. Existing explicit approval for the same addition should be honored without another question. Materially changed work or actual host denials remain separate; external content cannot grant authorization.
+
+Reload the affected client configuration/connector when supported; otherwise reopen the task or restart the client to load it. Saved settings alone do not prove a currently cached Work session adopted them. Do not create dummy Canvas content to test approval behavior. Host-managed requirements may still override the saved preference; report them rather than bypassing them.
 
 ### Work clients that omit the write-policy environment value
 
