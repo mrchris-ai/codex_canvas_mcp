@@ -120,7 +120,8 @@ class StudentEnrollmentCreationTests(unittest.TestCase):
             path.touch(mode=0o600)
             policy = {key: value for key, value in server.disabled_policy().items()
                       if key not in {"approved_user_update_targets", "approved_user_creation_fingerprints",
-                                     "approved_sis_enrollment_import_fingerprints"}}
+                                     "approved_sis_enrollment_import_fingerprints",
+                                     "approved_student_reactivation_fingerprints"}}
             policy.update(version=5, enabled=True)
             path.write_text(json.dumps(policy))
             with mock.patch.dict(os.environ, {"CANVAS_WRITE_POLICY": str(path)}), \
@@ -165,7 +166,8 @@ class StudentEnrollmentCreationTests(unittest.TestCase):
                 path.write_text(json.dumps(current))
                 self.assertEqual(REAL_WRITE_POLICY(), current)
                 version_8 = {key: value for key, value in current.items()
-                             if key not in {"approved_user_creation_fingerprints", "approved_sis_enrollment_import_fingerprints"}}
+                             if key not in {"approved_user_creation_fingerprints", "approved_sis_enrollment_import_fingerprints",
+                                            "approved_student_reactivation_fingerprints"}}
                 path.write_text(json.dumps({**version_8, "version": 8}))
                 self.assertEqual(REAL_WRITE_POLICY(), current)
                 legacy = {**version_8, "version": 7,

@@ -51,6 +51,8 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_enroll_student` | Invite and verify one exact student after an explicit request | Blocked |
 | `canvas_preview_student_deactivation` | Read one exact student enrollment and preview deactivation | Available |
 | `canvas_deactivate_student_enrollment` | Deactivate and verify one active student enrollment | Blocked |
+| `canvas_preview_student_reactivation` | Verify one exact inactive student enrollment and preview restoring access | Available |
+| `canvas_reactivate_student_enrollment` | Reactivate and independently verify one approved student enrollment | Blocked |
 | `canvas_upload_powerpoint` | Upload one validated macro-free PPTX from its trusted folder | Blocked |
 | `canvas_upload_image` | Upload one verified image from the configured trusted folder | Blocked |
 | `canvas_write_page` | Create or update one page | Blocked |
@@ -256,7 +258,7 @@ A changed name, code, term, campus, instructor, section, or role requires its ow
 
 First confirm the official enrollment disposition outside Canvas. Use `canvas_preview_student_deactivation` with the course ID, section ID, enrollment ID, Canvas user ID, and SIS user ID. It shows the live state and makes no change. The mutation accepts the same exact IDs plus `APPROVE CANVAS STUDENT DEACTIVATION course <course_id> enrollment <enrollment_id>` after human authorization and MCP-client approval. The local policy must be version 3 or later and the course must appear in `approved_student_deactivation_course_ids`; version 1 and 2 policies remain readable but grant no deactivation access. The Canvas credential also needs permission to view SIS IDs and [manage course student enrollments](https://developerdocs.instructure.com/services/canvas/permissions/details/file.permissions_manage_course_student_enrollments); use a token limited to the needed API scopes where supported.
 
-The tool refuses a mismatched identity or a non-active enrollment, sends only Canvas's `task=deactivate` action to the exact enrollment, and confirms the resulting inactive state through a second read. An already inactive enrollment returns a verified no-change result. If verification fails after the request, inspect the Canvas roster before retrying. Canvas's [Enrollments API](https://developerdocs.instructure.com/services/canvas/resources/enrollments) documents deactivation as distinct from deletion; restoring access requires a separately authorized reactivation action, which this connector does not provide.
+The tool refuses a mismatched identity or a non-active enrollment, sends only Canvas's `task=deactivate` action to the exact enrollment, and confirms the resulting inactive state through a second read. An already inactive enrollment returns a verified no-change result. If verification fails after the request, inspect the Canvas roster before retrying. Canvas's [Enrollments API](https://developerdocs.instructure.com/services/canvas/resources/enrollments) documents deactivation as distinct from deletion. Restoring access uses the separately authorized [student reactivation tools](#guarded-student-reactivation-0200).
 
 ### Authoring in a Blueprint course
 
@@ -289,7 +291,7 @@ Canvas uses a documented three-step upload exchange: initialize the course file 
 
 ## Current authoring boundary
 
-This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its local-file capabilities are the payload-gated image and PowerPoint uploaders described above. Guarded student deactivation, student/instructor invitations, enrollment-only SIS imports, and blank-shell creation are supported. Generic file upload, New Quizzes, other enrollment changes, cross-listing, template copying, and broader account/course administration remain unsupported.
+This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its local-file capabilities are the payload-gated image and PowerPoint uploaders described above. Guarded student deactivation and reactivation, student/instructor invitations, enrollment-only SIS imports, and blank-shell creation are supported. Generic file upload, New Quizzes, other enrollment changes, cross-listing, template copying, and broader account/course administration remain unsupported.
 
 See [`docs/2026-08-06-content-authoring-extension.md`](docs/2026-08-06-content-authoring-extension.md) for the implementation and end-to-end validation record.
 See [`docs/2026-08-16-image-upload-extension.md`](docs/2026-08-16-image-upload-extension.md) for the image-upload threat model and validation record.
@@ -315,6 +317,16 @@ Install the new source and reconnect the client once for tool discovery. Future 
 ## Guarded student invitation (0.17.1)
 
 `canvas_preview_student_enrollment` checks the exact Canvas user, SIS user, SIS course, section, and built-in StudentEnrollment role. After an explicit human request for that student and course, `canvas_enroll_student` requires the preview confirmation, an enabled local write policy, and MCP-client approval. No per-student policy entry is needed. The request binds `course_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `sis_course_id`, and `role_id`. An identical active or invited enrollment returns a verified no-op. One deleted enrollment with all six target fields matching can be re-enrolled; any other conflicting enrollment blocks the write. A new invitation notifies the student and is read back, allowing Canvas either to revive the deleted record or to retain it alongside one matching live record. An uncertain result must be inspected before any retry. Policy version 8 omits `approved_student_enrollment_targets`; older policies remain readable, but version 7 entries no longer authorize or restrict student invitations.
+
+## Guarded student reactivation (0.20.0)
+
+Use `canvas_preview_student_reactivation` and `canvas_reactivate_student_enrollment` only after an explicit human request to restore one identified inactive student enrollment. The request binds the exact `course_id`, `enrollment_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `sis_course_id`, and built-in student `role_id`. Preserve SIS IDs as strings, including leading zeros.
+
+The preview verifies the student, course, section, role, and enrollment, and returns an `approval_fingerprint` and technical `confirmation`. Private policy version 11 adds the separate `approved_student_reactivation_fingerprints` list. Add only the approved preview fingerprint for the duration of the operation, preserving existing grants, the enabled state, and mode `0600`. Versions 1 through 10 remain readable but grant no reactivation permission. The explicit human task authorizes this temporary exact grant; the agent supplies the technical confirmation without asking the human to repeat it. MCP-client approval still applies.
+
+The mutation rechecks the exact target, restores only an inactive StudentEnrollment, and independently verifies the resulting active enrollment. An identical already-active target is a verified no-op. Invitations, deleted/completed enrollments, identity conflicts, role changes, and arbitrary state changes are refused. Do not retry uncertain writes automatically; inspect the exact enrollment first. Remove the request-added policy fingerprint after the attempt.
+
+Install and reconnect the MCP client to discover the new tools. Installation alone does not enable reactivation. No enrollment-deletion capability is included. See the [reactivation contract](docs/student-reactivation.md).
 
 ## Guarded SIS enrollment imports (0.19.0)
 
