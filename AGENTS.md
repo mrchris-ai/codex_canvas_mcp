@@ -31,6 +31,12 @@ These rules apply to the entire repository.
 - Recheck SIS and Canvas identities, course/root/section, role, and existing enrollment before submission. Return a pending import ID rather than claiming enrollment success. Verify import completion/counts/errors and exact active enrollments with SIS import provenance.
 - Reserve a private local submission receipt before POST. Preserve it on failure or uncertainty and never automatically resubmit or erase it. No credentials or production receipts belong in Git. Tests must mock all credential and network access.
 
+## Authorized student reactivation exception
+
+- An explicit human request to restore an identified inactive student enrollment authorizes only that exact inactive-to-active transition through the dedicated preview and reactivation tools. This exception does not expand invitation, SIS import, or deactivation tools.
+- Bind course, section, enrollment, Canvas user, SIS user, SIS course, and built-in student role. Require the separate origin-bound exact-target fingerprint in private policy version 11, preview confirmation, enabled policy, and MCP-client approval. The authorized task includes its temporary exact grant without duplicate conversational approval. Preserve unrelated settings and mode 0600; remove request-added grants after the attempt.
+- Recheck identity and the current enrollment before the single PUT to the exact reactivation endpoint. Independently verify active state and protected enrollment fields. An identical active enrollment is a no-op; invitations, completed/deleted enrollments, conflicting roles/identities, and arbitrary state changes are refused. Never automatically retry uncertain writes. No enrollment deletion or student-account deletion is provided.
+
 ## Authorized user-account exception
 
 - Explicit human requests may change one existing user's username, primary email, or SIS ID through the dedicated preview/update tools. This supersedes the earlier blanket deferral of these three administrative fields only.
