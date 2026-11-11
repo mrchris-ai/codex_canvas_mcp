@@ -34,7 +34,7 @@ import certifi
 from canvas_mcp.content_authorization import CONTENT_AUTHORIZATION_GUIDANCE, CONTENT_WRITE_TOOLS
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.20.0"
+SERVER_VERSION = "0.21.0"
 PROTOCOL_VERSION = "2025-03-26"
 PROVISIONING_AUTHORIZATION_GUIDANCE = (
     "Carry forward the human's authorization for the exact provisioning task. "
@@ -215,7 +215,7 @@ def api_get(path: str, query: dict[str, Any] | None = None) -> Any:
 
 def disabled_policy() -> dict[str, Any]:
     return {
-        "version": 11,
+        "version": 12,
         "enabled": False,
         "approved_course_ids": [],
         "approved_rubric_delete_course_ids": [],
@@ -229,6 +229,7 @@ def disabled_policy() -> dict[str, Any]:
         "approved_user_creation_fingerprints": [],
         "approved_sis_enrollment_import_fingerprints": [],
         "approved_student_reactivation_fingerprints": [],
+        "approved_student_enrollment_deletion_fingerprints": [],
     }
 
 
@@ -278,29 +279,31 @@ def write_policy() -> dict[str, Any]:
         raise ConfigurationError("The Canvas write policy must be a JSON object.")
     version = policy.get("version")
     expected_keys = {"version", "enabled", "approved_course_ids"}
-    if version in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11}:
+    if version in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         expected_keys.add("approved_rubric_delete_course_ids")
-    if version in {3, 4, 5, 6, 7, 8, 9, 10, 11}:
+    if version in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         expected_keys.add("approved_student_deactivation_course_ids")
     provision_keys = ("approved_course_creation_account_ids",
                       "approved_instructor_enrollment_course_ids", "approved_instructor_role_ids")
-    if version in {4, 5, 6, 7, 8, 9, 10, 11}:
+    if version in {4, 5, 6, 7, 8, 9, 10, 11, 12}:
         expected_keys.update(provision_keys)
-    if version in {5, 6, 7, 8, 9, 10, 11}:
+    if version in {5, 6, 7, 8, 9, 10, 11, 12}:
         expected_keys.update(("approved_course_creation_targets", "approved_instructor_enrollment_targets"))
-    if version in {6, 7, 8, 9, 10, 11}:
+    if version in {6, 7, 8, 9, 10, 11, 12}:
         expected_keys.add("approved_user_update_targets")
     if version == 7:
         expected_keys.add("approved_student_enrollment_targets")
-    if version in {9, 10, 11}:
+    if version in {9, 10, 11, 12}:
         expected_keys.add("approved_user_creation_fingerprints")
-    if version in {10, 11}:
+    if version in {10, 11, 12}:
         expected_keys.add("approved_sis_enrollment_import_fingerprints")
-    if version == 11:
+    if version in {11, 12}:
         expected_keys.add("approved_student_reactivation_fingerprints")
+    if version == 12:
+        expected_keys.add("approved_student_enrollment_deletion_fingerprints")
     if set(policy) != expected_keys:
         raise ConfigurationError("The Canvas write policy contains unexpected keys.")
-    if type(version) is not int or version not in range(1, 12) or not isinstance(policy["enabled"], bool):
+    if type(version) is not int or version not in range(1, 13) or not isinstance(policy["enabled"], bool):
         raise ConfigurationError("The Canvas write policy has invalid version or enabled values.")
     course_ids = policy["approved_course_ids"]
     if not isinstance(course_ids, list) or any(
@@ -404,13 +407,20 @@ def write_policy() -> dict[str, Any]:
             for value in reactivation_fingerprints)
             or len(reactivation_fingerprints) != len(set(reactivation_fingerprints))):
         raise ConfigurationError("Student reactivation approvals must be unique SHA-256 fingerprints.")
+    deletion_fingerprints = policy.get("approved_student_enrollment_deletion_fingerprints", [])
+    if (not isinstance(deletion_fingerprints, list) or any(
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in deletion_fingerprints)
+            or len(deletion_fingerprints) != len(set(deletion_fingerprints))):
+        raise ConfigurationError("Student enrollment deletion approvals must be unique SHA-256 fingerprints.")
     return {
         "approved_user_update_targets": validated_updates,
         "approved_user_creation_fingerprints": creation_fingerprints,
         "approved_sis_enrollment_import_fingerprints": sis_fingerprints,
         "approved_student_reactivation_fingerprints": reactivation_fingerprints,
+        "approved_student_enrollment_deletion_fingerprints": deletion_fingerprints,
         **provision_policy,
-        "version": 11,
+        "version": 12,
         "enabled": policy["enabled"],
         "approved_course_ids": course_ids,
         "approved_rubric_delete_course_ids": rubric_delete_course_ids,
@@ -3002,10 +3012,11 @@ for _name, _apply in (("canvas_preview_user_creation", False), ("canvas_create_u
     })
 
 
-from canvas_mcp import reactivation, sis_import
+from canvas_mcp import enrollment_deletion, reactivation, sis_import
 
 TOOLS.extend(sis_import.tools())
 TOOLS.extend(reactivation.tools())
+TOOLS.extend(enrollment_deletion.tools())
 
 for _tool in TOOLS:
     if _tool["name"] in CONTENT_WRITE_TOOLS:
@@ -3013,6 +3024,10 @@ for _tool in TOOLS:
 
 
 def call_tool(name: str, args: dict[str, Any]) -> Any:
+    if name == "canvas_preview_student_enrollment_deletion":
+        return enrollment_deletion.preview(args)
+    if name == "canvas_delete_student_enrollment":
+        return enrollment_deletion.delete(args)
     if name == "canvas_preview_student_reactivation":
         return reactivation.preview(args)
     if name == "canvas_reactivate_student_enrollment":

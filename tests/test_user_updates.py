@@ -155,7 +155,7 @@ class UserUpdateTests(unittest.TestCase):
                 legacy = {key: value for key, value in current.items()
                           if key not in {'approved_user_update_targets', 'approved_user_creation_fingerprints',
                                          'approved_sis_enrollment_import_fingerprints',
-                                         'approved_student_reactivation_fingerprints'}}
+                                         'approved_student_reactivation_fingerprints', 'approved_student_enrollment_deletion_fingerprints'}}
                 legacy['version'] = 5
                 path.write_text(json.dumps(legacy))
                 self.assertEqual(server.write_policy()['approved_user_update_targets'], [])

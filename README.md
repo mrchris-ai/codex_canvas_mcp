@@ -52,6 +52,8 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_preview_student_deactivation` | Read one exact student enrollment and preview deactivation | Available |
 | `canvas_deactivate_student_enrollment` | Deactivate and verify one active student enrollment | Blocked |
 | `canvas_preview_student_reactivation` | Verify one exact inactive student enrollment and preview restoring access | Available |
+| `canvas_preview_student_enrollment_deletion` | Verify one exact student course enrollment for authorized deletion | Available |
+| `canvas_delete_student_enrollment` | Delete one exact active/invited course enrollment, preserving the account | Blocked |
 | `canvas_reactivate_student_enrollment` | Reactivate and independently verify one approved student enrollment | Blocked |
 | `canvas_upload_powerpoint` | Upload one validated macro-free PPTX from its trusted folder | Blocked |
 | `canvas_upload_image` | Upload one verified image from the configured trusted folder | Blocked |
@@ -291,7 +293,7 @@ Canvas uses a documented three-step upload exchange: initialize the course file 
 
 ## Current authoring boundary
 
-This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its local-file capabilities are the payload-gated image and PowerPoint uploaders described above. Guarded student deactivation and reactivation, student/instructor invitations, enrollment-only SIS imports, and blank-shell creation are supported. Generic file upload, New Quizzes, other enrollment changes, cross-listing, template copying, and broader account/course administration remain unsupported.
+This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its local-file capabilities are the payload-gated image and PowerPoint uploaders described above. Guarded student deactivation, reactivation, and exact enrollment deletion, student/instructor invitations, enrollment-only SIS imports, and blank-shell creation are supported. Generic file upload, New Quizzes, other enrollment changes, cross-listing, template copying, and broader account/course administration remain unsupported.
 
 See [`docs/2026-08-06-content-authoring-extension.md`](docs/2026-08-06-content-authoring-extension.md) for the implementation and end-to-end validation record.
 See [`docs/2026-08-16-image-upload-extension.md`](docs/2026-08-16-image-upload-extension.md) for the image-upload threat model and validation record.
@@ -326,7 +328,13 @@ The preview verifies the student, course, section, role, and enrollment, and ret
 
 The mutation rechecks the exact target, restores only an inactive StudentEnrollment, and independently verifies the resulting active enrollment. An identical already-active target is a verified no-op. Invitations, deleted/completed enrollments, identity conflicts, role changes, and arbitrary state changes are refused. Do not retry uncertain writes automatically; inspect the exact enrollment first. Remove the request-added policy fingerprint after the attempt.
 
-Install and reconnect the MCP client to discover the new tools. Installation alone does not enable reactivation. No enrollment-deletion capability is included. See the [reactivation contract](docs/student-reactivation.md).
+Install and reconnect the MCP client to discover the new tools. Installation alone does not enable reactivation. Enrollment deletion uses its separately authorized tools below. See the [reactivation contract](docs/student-reactivation.md).
+
+## Guarded student enrollment deletion (0.21.0)
+
+Use `canvas_preview_student_enrollment_deletion` and `canvas_delete_student_enrollment` only after explicit authorization to delete the identified course enrollment. For rollback, first reconcile the exact enrollment ID against prior write receipts. These tools preserve the student account and accept the same seven identity fields as reactivation. They require a separate origin-bound fingerprint in private policy version 12's `approved_student_enrollment_deletion_fingerprints`, the preview confirmation, enabled policy, and MCP-client approval. Earlier policies preserve their existing scopes and grant no deletion permission.
+
+Only exact active or invited enrollments transition to deleted through a fixed `task=delete` request; an exact deleted enrollment is a verified no-op. Inactive/completed and ambiguous enrollments fail. Independent read-back verifies the deleted enrollment and preserved account and protected fields. Remove request-added grants after the attempt and never automatically retry uncertainty. Install and reconnect for tool discovery. See the [enrollment deletion contract](docs/student-enrollment-deletion.md).
 
 ## Guarded SIS enrollment imports (0.19.0)
 
