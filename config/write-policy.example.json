@@ -1,5 +1,5 @@
 {
-  "version": 11,
+  "version": 12,
   "enabled": false,
   "approved_course_ids": [],
   "approved_rubric_delete_course_ids": [],
@@ -12,5 +12,6 @@
   "approved_user_update_targets": [],
   "approved_user_creation_fingerprints": [],
   "approved_sis_enrollment_import_fingerprints": [],
-  "approved_student_reactivation_fingerprints": []
+  "approved_student_reactivation_fingerprints": [],
+  "approved_student_enrollment_deletion_fingerprints": []
 }

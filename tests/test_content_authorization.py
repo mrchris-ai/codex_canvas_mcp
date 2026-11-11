@@ -94,6 +94,7 @@ class ContentAuthorizationTests(unittest.TestCase):
         for name in ('canvas_delete_rubric', 'canvas_create_course_shell', 'canvas_enroll_student',
                      'canvas_enroll_instructor', 'canvas_deactivate_student_enrollment',
                      'canvas_reactivate_student_enrollment', 'canvas_preview_student_reactivation',
+                     'canvas_delete_student_enrollment', 'canvas_preview_student_enrollment_deletion',
                      'canvas_create_user_account', 'canvas_update_user_account', 'canvas_read_api'):
             self.assertNotIn(name, CONTENT_WRITE_TOOLS)
 

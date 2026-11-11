@@ -250,7 +250,7 @@ class SisImportTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {'CANVAS_WRITE_POLICY': str(path)}):
             path.write_text(json.dumps(self.policy)); self.assertEqual(REAL_POLICY(), self.policy)
             old = {k: v for k, v in self.policy.items()
-                   if k not in {'approved_sis_enrollment_import_fingerprints', 'approved_student_reactivation_fingerprints'}}
+                   if k not in {'approved_sis_enrollment_import_fingerprints', 'approved_student_reactivation_fingerprints', 'approved_student_enrollment_deletion_fingerprints'}}
             old['version'] = 9; path.write_text(json.dumps(old))
             self.assertEqual(REAL_POLICY()['approved_sis_enrollment_import_fingerprints'], [])
             for bad in ([True], ['*'], ['a'*64, 'a'*64], 'a'*64):

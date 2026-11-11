@@ -274,11 +274,11 @@ class StudentReactivationTests(unittest.TestCase):
 
 
 class StudentReactivationPolicyTests(unittest.TestCase):
-    def test_version_11_requires_unique_exact_fingerprints(self):
+    def test_current_version_requires_unique_exact_fingerprints(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "policy.json"; path.touch(mode=0o600)
             policy = server.disabled_policy() | {"enabled": True, GRANTS: ["a" * 64]}
-            self.assertEqual(policy["version"], 11)
+            self.assertEqual(policy["version"], 12)
             with mock.patch.dict(os.environ, {"CANVAS_WRITE_POLICY": str(path)}):
                 path.write_text(json.dumps(policy)); self.assertEqual(REAL_WRITE_POLICY(), policy)
                 for invalid in ([True], ["*"], ["a" * 63], ["A" * 64], ["a" * 64] * 2, "a" * 64, None):
@@ -302,7 +302,7 @@ class StudentReactivationPolicyTests(unittest.TestCase):
                     if version >= 10: policy["approved_sis_enrollment_import_fingerprints"] = ["c" * 64]
                     with self.subTest(version=version):
                         path.write_text(json.dumps(policy)); result = REAL_WRITE_POLICY()
-                        self.assertEqual(result["version"], 11)
+                        self.assertEqual(result["version"], 12)
                         self.assertEqual(result[GRANTS], [])
                         for key, value in policy.items():
                             if key not in ("version", "approved_student_enrollment_targets"):

@@ -131,5 +131,6 @@ class UserCreationPolicyTests(unittest.TestCase):
                 policy.pop("approved_user_creation_fingerprints")
                 policy.pop("approved_sis_enrollment_import_fingerprints")
                 policy.pop("approved_student_reactivation_fingerprints")
+                policy.pop("approved_student_enrollment_deletion_fingerprints")
                 path.write_text(json.dumps({**policy, "version": 8}))
                 self.assertEqual(server.write_policy()["approved_user_creation_fingerprints"], [])
