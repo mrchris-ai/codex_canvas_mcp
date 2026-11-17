@@ -46,6 +46,10 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_enroll_instructor` | Invite and verify one instructor with an approved teacher role | Blocked |
 | `canvas_preview_student_enrollment` | Verify one student's identity, course, section, role, and existing enrollment | Available |
 | `canvas_enroll_student` | Invite and verify one exact student after an explicit request | Blocked |
+| `canvas_preview_user_creation` | Check one new root-account user and return its approval fingerprint | Available |
+| `canvas_create_user_account` | Create and verify one root-account user after an exact fingerprint grant | Blocked |
+| `canvas_preview_course_enrollment` | Check one existing user, course, and active course role | Available |
+| `canvas_enroll_user_in_course` | Enroll that user after an exact policy-version-10 target grant | Blocked |
 | `canvas_preview_student_deactivation` | Read one exact student enrollment and preview deactivation | Available |
 | `canvas_deactivate_student_enrollment` | Deactivate and verify one active student enrollment | Blocked |
 | `canvas_upload_powerpoint` | Upload one validated macro-free PPTX from its trusted folder | Blocked |
@@ -269,12 +273,13 @@ Canvas uses a documented three-step upload exchange: initialize the course file 
 
 ## Current authoring boundary
 
-This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its local-file capabilities are the payload-gated image and PowerPoint uploaders described above. Guarded student deactivation, blank-shell creation, and instructor invitations are supported. Generic file upload, New Quizzes, other enrollment changes, cross-listing, template copying, and broader account/course administration remain unsupported.
+This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its local-file capabilities are the payload-gated image and PowerPoint uploaders described above. Guarded student deactivation, blank-shell creation, instructor invitations, student invitations, student account creation, and exact enrollment of an existing user are supported. Generic file upload, New Quizzes, role changes, enrollment removal, reactivation, cross-listing, template copying, and broader account administration remain unsupported.
 
 See [`docs/2026-08-06-content-authoring-extension.md`](docs/2026-08-06-content-authoring-extension.md) for the implementation and end-to-end validation record.
 See [`docs/2026-08-16-image-upload-extension.md`](docs/2026-08-16-image-upload-extension.md) for the image-upload threat model and validation record.
 See [`docs/2026-08-24-support-maintenance-extension.md`](docs/2026-08-24-support-maintenance-extension.md) for the first support-maintenance tool contract and validation record.
 See [`docs/2026-09-17-announcement-authoring-extension.md`](docs/2026-09-17-announcement-authoring-extension.md) for the scheduled-announcement contract and validation record.
+See [`docs/2026-11-17-course-enrollment-and-account-email.md`](docs/2026-11-17-course-enrollment-and-account-email.md) for account-email choice, login domains, and general course enrollment.
 
 ## Development
 
@@ -294,13 +299,37 @@ Install the new source and reconnect the client once for tool discovery. Future 
 
 ## Guarded student invitation (0.17.1)
 
-`canvas_preview_student_enrollment` checks the exact Canvas user, SIS user, SIS course, section, and built-in StudentEnrollment role. After an explicit human request for that student and course, `canvas_enroll_student` requires the preview confirmation, an enabled local write policy, and MCP-client approval. No per-student policy entry is needed. The request binds `course_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `sis_course_id`, and `role_id`. An identical active or invited enrollment returns a verified no-op. One deleted enrollment with all six target fields matching can be re-enrolled; any other conflicting enrollment blocks the write. A new invitation notifies the student and is read back, allowing Canvas either to revive the deleted record or to retain it alongside one matching live record. An uncertain result must be inspected before any retry. Policy version 8 omits `approved_student_enrollment_targets`; older policies remain readable, but version 7 entries no longer authorize or restrict student invitations.
+`canvas_preview_student_enrollment` checks the exact Canvas user, SIS user, SIS course, section, and built-in StudentEnrollment role. After an explicit human request for that student and course, `canvas_enroll_student` requires the preview confirmation, an enabled local write policy, and MCP-client approval. No per-student policy entry is needed. That missing per-target list is unchanged. Use the version 10 course-enrollment tools below when the enrollment needs its own allowlist entry or a role other than the built-in student role. The request binds `course_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `sis_course_id`, and `role_id`. An identical active or invited enrollment returns a verified no-op. One deleted enrollment with all six target fields matching can be re-enrolled; any other conflicting enrollment blocks the write. A new invitation notifies the student and is read back, allowing Canvas either to revive the deleted record or to retain it alongside one matching live record. An uncertain result must be inspected before any retry. Policy version 8 omits `approved_student_enrollment_targets`; older policies remain readable, but version 7 entries no longer authorize or restrict student invitations.
 
 ## Guarded student account creation (0.18.0)
 
-Verify the student's identity, institutional email, and eligibility in the institution's records before requesting account creation. `canvas_preview_user_creation` takes `account_id`, `name`, `short_name`, `sortable_name`, `email`, and a ten-digit `sis_user_id` string. It checks the active Canvas root account, the operator's login and SIS permissions, and possible duplicate accounts. The same email is used as the login and contact address. Canvas receives a request to send the account notification.
+Verify the student's identity, institutional email, and eligibility in the institution's records before requesting account creation. `canvas_preview_user_creation` takes `account_id`, `name`, `short_name`, `sortable_name`, `email`, a ten-digit `sis_user_id` string, and optional `send_confirmation`. It checks the active Canvas root account, the operator's login and SIS permissions, and possible duplicate accounts. The same email is used as the login and contact address.
 
-For an explicitly authorized account, add the preview's `approval_fingerprint` to `approved_user_creation_fingerprints` in the private version 9 policy, preserving its enabled state and other grants. Earlier policy versions remain readable and grant no account creation. Call `canvas_create_user_account` with the same fields and the preview's `confirmation` under MCP-client approval. The write checks for duplicates again and reads back the names, active login, SIS ID, and contact channel. If the write outcome is uncertain, inspect Canvas before any new attempt. Remove the temporary fingerprint after the attempt. Course enrollment is a separate operation.
+`send_confirmation` maps to Canvas `pseudonym[send_confirmation]`. It defaults to `true`, which is the previous hard-coded behavior, so an omitted value still asks Canvas to email the user about the new account. Pass `false` to skip that email. The boolean is always part of the approval fingerprint. Omitting it and passing `true` produce the same fingerprint. Passing `false` produces a different fingerprint, so an approval for one choice does not cover the other. Adding the field also changes fingerprints that were issued before this release; preview again and replace the stored fingerprint.
+
+The login email is lowercased before the domain check, so mixed-case lookalikes cannot form a second approval. The domain must be exactly one entry in `CANVAS_USER_CREATION_EMAIL_DOMAINS`. When that variable is unset or blank, the allowed domains are `sdccd.edu` and `student.sdccd.edu`. A set value replaces the default list. Subdomains, suffixes, and other lookalikes are rejected. Plus-addressing remains allowed because the previous email check allowed it; the domain must still match exactly.
+
+For an explicitly authorized account, add the preview's `approval_fingerprint` to `approved_user_creation_fingerprints` in the private policy. Policy version 9 introduced that list. Version 10 keeps it. Earlier policy versions remain readable and grant no account creation. Call `canvas_create_user_account` with the same fields and the preview's `confirmation` under MCP-client approval. The write checks for duplicates again and reads back the names, active login, SIS ID, and contact channel. If the write outcome is uncertain, inspect Canvas before any new attempt. Remove the temporary fingerprint after the attempt. Course enrollment is a separate operation.
+
+## Guarded course enrollment (0.19.0)
+
+`canvas_preview_course_enrollment` and `canvas_enroll_user_in_course` enroll one existing user in one course with one active course-level role. Identify the user by `canvas_user_id`, `sis_user_id`, or both. Both values must name the same person when both are sent. Optional `section_id` selects a section in that course. Omitted `enrollment_state` becomes `invited`, and omitted `notify` becomes `false`, matching the [Canvas enrollments API](https://developerdocs.instructure.com/services/canvas/resources/enrollments). `active` and `inactive` are accepted when supplied.
+
+The preview reads the course account's roles, including inherited roles, and rejects a missing, account-level, or inactive role. Built-in roles (`workflow_state` `built_in`) and active custom roles are accepted. The write sends `enrollment[role_id]` as requested and sets `enrollment[type]` from that role's live `base_role_type` (`StudentEnrollment`, `TeacherEnrollment`, `TaEnrollment`, `DesignerEnrollment`, or `ObserverEnrollment`). Course-wide privileges are requested. An identical enrollment is a verified no-op. A same-role enrollment in a different state is left unchanged. This tool does not remove enrollments or change an existing role.
+
+Policy version 10 adds `approved_course_enrollment_targets`. Each entry is the normalized target and must include `course_id`, `role_id`, `enrollment_state`, `notify`, and at least one of `canvas_user_id` or `sis_user_id`. Include `section_id` only when the enrollment is for that section. `canvas_enroll_user_in_course` requires `enabled: true`, that exact entry, and the preview confirmation. The confirmation is `APPROVE CANVAS COURSE ENROLLMENT` plus the SHA-256 of the approved identity, the course id, and the enrollment object that will be posted: resolved Canvas user id, `type`, `role_id`, `enrollment_state`, `notify`, `course_section_id` when a section was requested, and `limit_privileges_to_course_section: false`. Preview and write hash that same object. A confirmation cannot authorize a target that is absent from the allowlist. Versions 1–9 remain readable, keep the scopes they already had, and grant no course enrollment through this tool. `canvas_enroll_student` and `canvas_enroll_instructor` are unchanged.
+
+```json
+{
+  "course_id": 30,
+  "role_id": 4435,
+  "sis_user_id": "0000000001",
+  "enrollment_state": "invited",
+  "notify": false
+}
+```
+
+Keep real IDs in the private policy only. The example file stays disabled and empty. See [the contract](docs/2026-11-17-course-enrollment-and-account-email.md).
 
 ## API-first workflow
 

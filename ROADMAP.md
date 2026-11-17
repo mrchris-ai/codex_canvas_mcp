@@ -28,13 +28,13 @@ Each future feature needs its own narrow tool contract, least-privilege credenti
 
 ### User administration
 
-- Explicitly authorized username, primary email, and SIS ID updates are implemented through exact-target preview/update tools. Single student account creation uses its own guarded preview and create tools. Other account operations remain deferred.
+- Explicitly authorized username, primary email, and SIS ID updates are implemented through exact-target preview/update tools. Single student account creation uses its own guarded preview and create tools, with an exact login domain and a fingerprinted account-email choice. Other account operations remain deferred.
 
 - One-student deactivation is implemented through a dedicated preview and guarded mutation. It does not remove an enrollment.
 - Resolve identities without exposing unnecessary profile data.
 - One exact instructor invitation is implemented for an existing Canvas/SIS identity and an approved TeacherEnrollment role. Existing conflicts are refused.
-- Broad student enrollment creation, reactivation, role changes, removals, and broader invitations remain deferred. A guarded exact student invitation is implemented.
-- Require role and course constraints in local policy.
+- A guarded exact student invitation is implemented. It still has no per-student allowlist.
+- One existing user can be enrolled in one course with one active course-level role through `canvas_preview_course_enrollment` and `canvas_enroll_user_in_course`. Policy version 10 requires an exact `approved_course_enrollment_targets` entry. Account-level roles, inactive roles, role changes, removals, reactivation, and bulk enrollment remain deferred.
 
 ### Maintenance
 
