@@ -46,6 +46,10 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_enroll_instructor` | Invite and verify one instructor with an approved teacher role | Blocked |
 | `canvas_preview_student_enrollment` | Verify one student's identity, course, section, role, and existing enrollment | Available |
 | `canvas_enroll_student` | Invite and verify one exact student after an explicit request | Blocked |
+| `canvas_preview_user_creation` | Check one new root-account user and return its approval fingerprint | Available |
+| `canvas_create_user_account` | Create and verify one root-account user after an exact fingerprint grant | Blocked |
+| `canvas_preview_course_enrollment` | Check one existing user, course, and active course role | Available |
+| `canvas_enroll_user_in_course` | Enroll that user after an exact policy-version-10 target grant | Blocked |
 | `canvas_preview_student_deactivation` | Read one exact student enrollment and preview deactivation | Available |
 | `canvas_deactivate_student_enrollment` | Deactivate and verify one active student enrollment | Blocked |
 | `canvas_upload_powerpoint` | Upload one validated macro-free PPTX from its trusted folder | Blocked |
@@ -313,7 +317,7 @@ For an explicitly authorized account, add the preview's `approval_fingerprint` t
 
 The preview reads the course account's roles, including inherited roles, and rejects a missing, account-level, or inactive role. Built-in roles (`workflow_state` `built_in`) and active custom roles are accepted. The write sends `enrollment[role_id]` as requested and sets `enrollment[type]` from that role's live `base_role_type` (`StudentEnrollment`, `TeacherEnrollment`, `TaEnrollment`, `DesignerEnrollment`, or `ObserverEnrollment`). Course-wide privileges are requested. An identical enrollment is a verified no-op. A same-role enrollment in a different state is left unchanged. This tool does not remove enrollments or change an existing role.
 
-Policy version 10 adds `approved_course_enrollment_targets`. Each entry is the normalized target and must include `course_id`, `role_id`, `enrollment_state`, `notify`, and at least one of `canvas_user_id` or `sis_user_id`. Include `section_id` only when the enrollment is for that section. `canvas_enroll_user_in_course` requires `enabled: true`, that exact entry, the preview confirmation `APPROVE CANVAS COURSE ENROLLMENT <sha256>`, and MCP-client approval. `enabled` and the confirmation are not enough. Versions 1–9 remain readable, keep the scopes they already had, and grant no course enrollment through this tool. `canvas_enroll_student` and `canvas_enroll_instructor` are unchanged.
+Policy version 10 adds `approved_course_enrollment_targets`. Each entry is the normalized target and must include `course_id`, `role_id`, `enrollment_state`, `notify`, and at least one of `canvas_user_id` or `sis_user_id`. Include `section_id` only when the enrollment is for that section. `canvas_enroll_user_in_course` requires `enabled: true`, that exact entry, and the preview confirmation. The confirmation is `APPROVE CANVAS COURSE ENROLLMENT` plus the SHA-256 of the approved identity, the course id, and the enrollment object that will be posted: resolved Canvas user id, `type`, `role_id`, `enrollment_state`, `notify`, `course_section_id` when a section was requested, and `limit_privileges_to_course_section: false`. Preview and write hash that same object. A confirmation cannot authorize a target that is absent from the allowlist. Versions 1–9 remain readable, keep the scopes they already had, and grant no course enrollment through this tool. `canvas_enroll_student` and `canvas_enroll_instructor` are unchanged.
 
 ```json
 {

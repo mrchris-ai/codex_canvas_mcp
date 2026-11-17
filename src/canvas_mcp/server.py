@@ -2080,22 +2080,54 @@ def course_enrollment_policy_target(value: Any) -> dict[str, Any]:
     return course_enrollment_target(value, False)
 
 
-def course_enrollment_confirmation(target: dict[str, Any]) -> str:
-    digest = hashlib.sha256(json.dumps(target, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
-    return f"APPROVE CANVAS COURSE ENROLLMENT {digest}"
+def course_enrollment_allowlist(target: dict[str, Any]) -> None:
+    """Reject before any Canvas call unless this exact target is listed.
 
-
-def course_enrollment_approval(target: dict[str, Any], confirmation: Any) -> None:
+    enabled and a confirmation are not consulted here. A matching confirmation
+    cannot authorize a different user, course, role, section, state, or notify flag.
+    """
     policy = write_policy()
-    # enabled and a matching confirmation are not enough: the exact target must be listed.
     if not policy["enabled"] or target not in policy.get("approved_course_enrollment_targets", []):
         raise PermissionError(
             "Course enrollment requires this exact user, course, role, section, state, and notify "
             "flag in approved_course_enrollment_targets on an enabled policy."
         )
-    expected = course_enrollment_confirmation(target)
-    if confirmation != expected:
-        raise PermissionError(f"Confirmation must exactly match the preview: {expected}")
+
+
+def course_enrollment_body(target: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    """The enrollment object that will be posted. Preview and write share this dict."""
+    if "canvas_user_id" in target and context["user_id"] != target["canvas_user_id"]:
+        raise ValueError("Canvas user id does not match.")
+    body = {
+        "user_id": context["user_id"],
+        "type": context["enrollment_type"],
+        "role_id": target["role_id"],
+        "enrollment_state": target["enrollment_state"],
+        "notify": target["notify"],
+        "limit_privileges_to_course_section": False,
+    }
+    if "section_id" in target:
+        body["course_section_id"] = target["section_id"]
+    return body
+
+
+def course_enrollment_confirmation(target: dict[str, Any], body: dict[str, Any]) -> str:
+    """Hash every field the write will send, plus the approved identity and course.
+
+    The resolved Canvas user id is inside body["user_id"]. A SIS id that later
+    points at a different person produces a different hash, so a stale preview
+    cannot enroll that person.
+    """
+    canonical = {
+        "course_id": target["course_id"],
+        "canvas_user_id": target.get("canvas_user_id"),
+        "sis_user_id": target.get("sis_user_id"),
+        "enrollment": body,
+    }
+    digest = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    return f"APPROVE CANVAS COURSE ENROLLMENT {digest}"
 
 
 def course_enrollment_user(target: dict[str, Any]) -> dict[str, Any]:
@@ -2201,6 +2233,7 @@ def course_enrollment_result(target: dict[str, Any], context: dict[str, Any], re
 def preview_course_enrollment(args: dict[str, Any]) -> dict[str, Any]:
     target = course_enrollment_target(args, False)
     context = course_enrollment_preflight(target)
+    body = course_enrollment_body(target, context)
     existing = context["existing"]
     return {
         **target,
@@ -2209,8 +2242,9 @@ def preview_course_enrollment(args: dict[str, Any]) -> dict[str, Any]:
         "course_name": context["course_name"],
         "role_label": context["role_label"],
         "enrollment_type": context["enrollment_type"],
+        "enrollment": body,
         "existing_enrollment": existing["id"] if existing else None,
-        "confirmation": course_enrollment_confirmation(target),
+        "confirmation": course_enrollment_confirmation(target, body),
         "read_only": True,
         "effect": (
             "No write: an identical enrollment already exists."
@@ -2224,22 +2258,17 @@ def preview_course_enrollment(args: dict[str, Any]) -> dict[str, Any]:
 
 def enroll_user_in_course(args: dict[str, Any]) -> dict[str, Any]:
     target = course_enrollment_target(args, True)
-    course_enrollment_approval(target, args.get("confirmation"))
+    course_enrollment_allowlist(target)
     context = course_enrollment_preflight(target)
+    body = course_enrollment_body(target, context)
+    expected = course_enrollment_confirmation(target, body)
+    if args.get("confirmation") != expected:
+        raise PermissionError(f"Confirmation must exactly match the preview: {expected}")
     if context["existing"]:
         return course_enrollment_result(target, context, context["existing"], False)
     enrollment_id = None
     try:
-        enrollment = {
-            "user_id": context["user_id"],
-            "type": context["enrollment_type"],
-            "role_id": target["role_id"],
-            "enrollment_state": target["enrollment_state"],
-            "notify": target["notify"],
-            "limit_privileges_to_course_section": False,
-        }
-        if "section_id" in target:
-            enrollment["course_section_id"] = target["section_id"]
+        enrollment = body
         created = request_api(
             "POST", f"/api/v1/courses/{target['course_id']}/enrollments", data={"enrollment": enrollment}
         )
@@ -3353,8 +3382,11 @@ for _name, _apply in (("canvas_preview_course_enrollment", False), ("canvas_enro
                        "is the requested role. Account-level roles and inactive roles are rejected. "
                        "section_id is optional. enrollment_state defaults to invited and notify defaults "
                        "to false, matching Canvas. The write requires an enabled policy version 10, "
-                       "the exact target in approved_course_enrollment_targets, the preview confirmation, "
-                       "and MCP-client approval. Enabled and confirmation alone are not enough. "
+                       "the exact target in approved_course_enrollment_targets, and the preview "
+                       "confirmation. That confirmation is a hash of the approved identity, the course, "
+                       "and every enrollment field that will be posted, including the resolved user, "
+                       "role type, state, notify flag, and section. Enabled and confirmation alone are "
+                       "not enough. "
                        "An identical enrollment is a no-op. This tool does not change or remove enrollments. "
                        + COURSE_ENROLLMENT_AUTHORIZATION_GUIDANCE,
         "inputSchema": {"type": "object", "properties": _properties,

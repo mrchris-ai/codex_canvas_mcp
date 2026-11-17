@@ -22,6 +22,8 @@ class CourseEnrollmentTests(unittest.TestCase):
             {"id": 7777, "label": "Lab Instructor", "base_role_type": "TeacherEnrollment", "workflow_state": "active"},
             {"id": 80, "label": "Account Admin", "base_role_type": "AccountMembership", "workflow_state": "active"},
             {"id": 81, "label": "Old TA", "base_role_type": "TaEnrollment", "workflow_state": "inactive"},
+            {"id": 82, "label": "Deleted TA", "base_role_type": "TaEnrollment", "workflow_state": "deleted"},
+            {"id": 83, "label": "Built-in Admin", "base_role_type": "AccountMembership", "workflow_state": "built_in"},
         ]
         self.records = []
         self.posted = None
@@ -62,7 +64,7 @@ class CourseEnrollmentTests(unittest.TestCase):
             self.assertTrue(query.get("show_inherited"))
             return copy.deepcopy(self.roles)
         self.assertEqual(path, f"/api/v1/courses/{self.course_id}/enrollments")
-        self.assertEqual(query["user_id"], self.user_id)
+        self.assertEqual(query["user_id"], self.user["id"])
         return copy.deepcopy(self.records)
 
     def fake_write(self, method, path, *, data):
@@ -87,9 +89,17 @@ class CourseEnrollmentTests(unittest.TestCase):
     def enroll(self, target):
         normalized = server.course_enrollment_target(target, False)
         self.policy["approved_course_enrollment_targets"] = [normalized]
-        return server.enroll_user_in_course({
-            **target, "confirmation": server.course_enrollment_confirmation(normalized),
-        })
+        preview = server.preview_course_enrollment(target)
+        again = server.preview_course_enrollment(target)
+        self.assertEqual(preview["confirmation"], again["confirmation"])
+        result = server.enroll_user_in_course({**target, "confirmation": preview["confirmation"]})
+        if self.posted is not None:
+            self.assertEqual(self.posted["enrollment"], preview["enrollment"])
+            self.assertEqual(
+                preview["confirmation"],
+                server.course_enrollment_confirmation(normalized, preview["enrollment"]),
+            )
+        return result
 
     def test_ta_enrollment_payload(self):
         preview = server.call_tool("canvas_preview_course_enrollment", self.target)
@@ -136,14 +146,15 @@ class CourseEnrollmentTests(unittest.TestCase):
 
     def test_notify_flag_changes_the_approved_target_and_payload(self):
         notified = {**self.target, "notify": True}
-        self.assertNotEqual(
-            server.course_enrollment_confirmation(self.target),
-            server.course_enrollment_confirmation(notified),
-        )
+        quiet = server.preview_course_enrollment(self.target)
+        loud = server.preview_course_enrollment(notified)
+        self.assertNotEqual(quiet["confirmation"], loud["confirmation"])
+        self.assertFalse(quiet["enrollment"]["notify"])
+        self.assertTrue(loud["enrollment"]["notify"])
+        self.write.reset_mock()
+        self.read.reset_mock()
         with self.assertRaises(PermissionError):
-            server.enroll_user_in_course({
-                **notified, "confirmation": server.course_enrollment_confirmation(notified),
-            })
+            server.enroll_user_in_course({**notified, "confirmation": loud["confirmation"]})
         self.read.assert_not_called()
         self.write.assert_not_called()
         self.enroll(notified)
@@ -161,13 +172,12 @@ class CourseEnrollmentTests(unittest.TestCase):
         self.assertNotIn("course_section_id", self.posted["enrollment"])
 
     def test_account_level_role_rejected(self):
-        target = {**self.target, "role_id": 80}
-        self.policy["approved_course_enrollment_targets"] = [target]
-        with self.assertRaisesRegex(ValueError, "Account-level"):
-            server.enroll_user_in_course({
-                **target, "confirmation": server.course_enrollment_confirmation(target),
-            })
-        self.write.assert_not_called()
+        for role_id, message in ((80, "Account-level"), (83, "Account-level"), (82, "not an active")):
+            target = {**self.target, "role_id": role_id}
+            self.policy["approved_course_enrollment_targets"] = [target]
+            with self.subTest(role_id=role_id), self.assertRaisesRegex(ValueError, message):
+                server.enroll_user_in_course({**target, "confirmation": "stale"})
+            self.write.assert_not_called()
 
     def test_inactive_role_rejected(self):
         target = {**self.target, "role_id": 81}
@@ -177,7 +187,7 @@ class CourseEnrollmentTests(unittest.TestCase):
         self.write.assert_not_called()
 
     def test_missing_allowlist_and_disabled_policy_block_before_network(self):
-        confirmation = server.course_enrollment_confirmation(self.target)
+        confirmation = "APPROVE CANVAS COURSE ENROLLMENT " + ("ab" * 32)
         self.policy["approved_course_enrollment_targets"] = []
         with self.assertRaises(PermissionError):
             server.enroll_user_in_course({**self.target, "confirmation": confirmation})
@@ -189,11 +199,13 @@ class CourseEnrollmentTests(unittest.TestCase):
         self.list.assert_not_called()
         self.write.assert_not_called()
 
-    def test_wrong_confirmation_blocks_before_network(self):
+    def test_wrong_confirmation_blocks_the_write(self):
+        preview = server.preview_course_enrollment(self.target)
+        self.write.reset_mock()
         with self.assertRaises(PermissionError):
             server.enroll_user_in_course({**self.target, "confirmation": "APPROVE CANVAS COURSE ENROLLMENT " + ("ab" * 32)})
-        self.read.assert_not_called()
         self.write.assert_not_called()
+        self.assertNotEqual(preview["confirmation"], "APPROVE CANVAS COURSE ENROLLMENT " + ("ab" * 32))
 
     def test_mismatched_identity_and_missing_user_are_rejected(self):
         with self.assertRaises(ValueError):
@@ -202,6 +214,52 @@ class CourseEnrollmentTests(unittest.TestCase):
         self.policy["approved_course_enrollment_targets"] = [server.course_enrollment_target(mismatched, False)]
         with self.assertRaisesRegex(ValueError, "SIS user"):
             server.preview_course_enrollment(mismatched)
+        self.write.assert_not_called()
+
+    def test_allowlist_match_is_exact_for_every_identity_field(self):
+        approved = dict(self.target)
+        swaps = (
+            {"course_id": 31},
+            {"role_id": 60},
+            {"sis_user_id": "0000000001"},
+            {"canvas_user_id": 999},
+            {"section_id": self.section_id},
+            {"enrollment_state": "active"},
+            {"notify": True},
+        )
+        for change in swaps:
+            mutated = {**approved, **change}
+            self.policy["approved_course_enrollment_targets"] = [approved]
+            with self.subTest(change=change), self.assertRaises(PermissionError):
+                server.enroll_user_in_course({**mutated, "confirmation": "fresh-confirmation"})
+            self.read.assert_not_called()
+            self.write.assert_not_called()
+            self.read.reset_mock()
+            self.write.reset_mock()
+
+    def test_stale_preview_cannot_enroll_a_reassigned_sis_user(self):
+        preview = server.preview_course_enrollment(self.target)
+        self.assertEqual(preview["enrollment"]["user_id"], self.user_id)
+        self.user = {"id": 999, "name": "Other Person", "sis_user_id": self.sis_user_id}
+        self.write.reset_mock()
+        with self.assertRaises(PermissionError):
+            server.enroll_user_in_course({**self.target, "confirmation": preview["confirmation"]})
+        self.write.assert_not_called()
+
+    def test_canvas_id_approval_does_not_accept_a_different_canvas_user(self):
+        approved = {
+            "course_id": self.course_id, "role_id": 4435, "canvas_user_id": self.user_id,
+            "enrollment_state": "invited", "notify": False,
+        }
+        self.policy["approved_course_enrollment_targets"] = [approved]
+        other = {**approved, "canvas_user_id": 999}
+        with self.assertRaises(PermissionError):
+            server.enroll_user_in_course({**other, "confirmation": "fresh-confirmation"})
+        sis_only = {key: value for key, value in approved.items() if key != "canvas_user_id"}
+        sis_only["sis_user_id"] = self.sis_user_id
+        with self.assertRaises(PermissionError):
+            server.enroll_user_in_course({**sis_only, "confirmation": "fresh-confirmation"})
+        self.read.assert_not_called()
         self.write.assert_not_called()
 
     def test_identical_enrollment_is_noop_and_state_conflict_does_not_write(self):
@@ -249,7 +307,7 @@ class CourseEnrollmentPolicyTests(unittest.TestCase):
             "course_id": 30, "role_id": 4435, "sis_user_id": "3330004671",
             "enrollment_state": "invited", "notify": False,
         }, False)
-        self.confirmation = server.course_enrollment_confirmation(self.target)
+        self.confirmation = "stale-confirmation"
 
     def write_policy_file(self, directory, policy):
         path = Path(directory) / "policy.json"
@@ -337,6 +395,27 @@ class CourseEnrollmentPolicyTests(unittest.TestCase):
                     self.write_policy_file(directory, policy)
                     with self.subTest(bad=bad), self.assertRaises(server.ConfigurationError):
                         server.write_policy()
+
+    def test_release_versions_and_disabled_example_policy(self):
+        import canvas_mcp
+        import tomllib
+        root = Path(__file__).resolve().parents[1]
+        self.assertEqual(canvas_mcp.__version__, "0.19.0")
+        self.assertEqual(server.SERVER_VERSION, "0.19.0")
+        self.assertEqual(server.POLICY_VERSION, 10)
+        with (root / "pyproject.toml").open("rb") as stream:
+            self.assertEqual(tomllib.load(stream)["project"]["version"], "0.19.0")
+        example = json.loads((root / "config" / "write-policy.example.json").read_text())
+        self.assertEqual(example["version"], 10)
+        self.assertIs(example["enabled"], False)
+        self.assertEqual(example["approved_course_enrollment_targets"], [])
+        self.assertEqual(example["approved_user_creation_fingerprints"], [])
+        for value in example.values():
+            if value is False or value == 10:
+                continue
+            self.assertEqual(value, [])
+        readme = (root / "README.md").read_text()
+        self.assertIn("## Guarded course enrollment (0.19.0)", readme)
 
     def test_enabled_confirmation_without_allowlist_does_not_write(self):
         with tempfile.TemporaryDirectory() as directory:

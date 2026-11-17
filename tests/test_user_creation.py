@@ -180,7 +180,13 @@ class UserCreationEmailDomainTests(unittest.TestCase):
             "person@sdccdedu",
             "person@student.sdccd.education",
             "person@sdccd.edu.student.sdccd.edu",
+            "person@sdccd.edu@student.sdccd.edu",
+            "person@@sdccd.edu",
+            "person@sdccd.edu.",
+            "person@sdccd .edu",
             "pérson@sdccd.edu",
+            "person@sdccd.edu".replace("c", "\u0441"),
+            "person@\uff53dccd.edu",
             "person@SDCCD.EDU.EVIL.COM",
             "person@sdccd.edu ",
         ):
@@ -193,12 +199,19 @@ class UserCreationEmailDomainTests(unittest.TestCase):
             self.assertEqual(self.address("person@example.edu"), "person@example.edu")
             with self.assertRaises(ValueError):
                 self.address("person@sdccd.edu")
-        for raw in ("*", "sdccd.edu, *", "not a domain", ",", "sdccd.edu,sdccd.edu"):
+        for raw in ("*", "sdccd.edu, *", "not a domain", ",", "sdccd.edu,sdccd.edu",
+                    "sdccd.edu,*.sdccd.edu", "sdccd.edu.", ".sdccd.edu"):
             with self.subTest(raw=raw), mock.patch.dict(
                 os.environ, {"CANVAS_USER_CREATION_EMAIL_DOMAINS": raw}
             ):
                 with self.assertRaises(ValueError):
                     self.address("person@sdccd.edu")
+                    self.address("person@a.sdccd.edu")
+
+    def test_blank_override_keeps_only_the_documented_defaults(self):
+        with mock.patch.dict(os.environ, {"CANVAS_USER_CREATION_EMAIL_DOMAINS": "   "}):
+            self.assertEqual(tuple(server.user_creation_email_domains()), server.DEFAULT_USER_CREATION_EMAIL_DOMAINS)
+            self.assertEqual(self.address("person@student.sdccd.edu"), "person@student.sdccd.edu")
 
 
 class UserCreationPolicyTests(unittest.TestCase):

@@ -22,6 +22,8 @@ An identical same-role enrollment is a verified no-op. A same-role enrollment wh
 
 ## Policy
 
+The confirmation hashes the approved `canvas_user_id` (or null), `sis_user_id` (or null), `course_id`, and the enrollment object that will be posted. That object contains the resolved numeric user id, `type` from `base_role_type`, `role_id`, `enrollment_state`, `notify`, `limit_privileges_to_course_section`, and `course_section_id` when a section was requested. Preview and write build it with the same function. A SIS id that resolves to a different person than the preview produces a different confirmation, so the old preview cannot enroll them.
+
 `canvas_enroll_user_in_course` requires all of the following:
 
 - `enabled: true`
