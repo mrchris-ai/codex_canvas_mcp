@@ -41,6 +41,19 @@ class UploadConfigTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
         self.assertEqual(dict(os.environ), {})
 
+    def test_policy_tool_reports_running_version_and_upload_readiness_without_writes(self):
+        with patch.object(server, 'canvas_token') as token:
+            result = server.call_tool('canvas_get_write_policy', {})
+            self.assertEqual(result['connector_version'], server.SERVER_VERSION)
+            self.assertFalse(result['enabled'])
+            self.assertFalse(result['image_upload_configuration']['ready'])
+            self.write()
+            result = server.call_tool('canvas_get_write_policy', {})
+            self.assertTrue(result['image_upload_configuration']['ready'])
+            self.assertEqual(server.write_policy(), server.disabled_policy())
+            self.assertNotIn('CANVAS_TOKEN', json.dumps(result))
+            token.assert_not_called()
+
     def test_private_default_restores_root_but_not_write_authorization(self):
         self.write()
         self.assertEqual(server.image_upload_root(), self.root.resolve())
