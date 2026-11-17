@@ -195,7 +195,7 @@ def request_api(
     request = urllib.request.Request(url, data=body, method=method, headers=headers)
     context = ssl.create_default_context(cafile=certifi.where())
     try:
-        with urllib.request.urlopen(request, timeout=30, context=context) as response:
+        with urllib.request.urlopen(request, timeout=120, context=context) as response:
             body = json.load(response)
             return (body, response.headers.get("Link", "")) if _include_links else body
     except urllib.error.HTTPError as exc:
