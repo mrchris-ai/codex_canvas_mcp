@@ -31,6 +31,11 @@ These rules apply to the entire repository.
 - Recheck SIS and Canvas identities, course/root/section, role, and existing enrollment before submission. Return a pending import ID rather than claiming enrollment success. Verify import completion/counts/errors and exact active enrollments with SIS import provenance.
 - Reserve a private local submission receipt before POST. Preserve it on failure or uncertainty and never automatically resubmit or erase it. No credentials or production receipts belong in Git. Tests must mock all credential and network access.
 
+## Authorized exact student deactivation option
+
+- An explicitly approved active-to-inactive action may use policy version 13's separate `approved_student_deactivation_grants` instead of a lasting course grant. Bind the Canvas origin, operation, course, section, enrollment, Canvas/SIS identity, built-in student role and inactive result to the preview fingerprint and confirmation.
+- Exact grants require a strict UTC expiry within 15 minutes at execution, enabled private policy, and MCP-client approval. Recheck permission immediately before the fixed `task=deactivate` request; independently verify inactive state and protected fields. Remove request-added grants after the attempt, preserving unrelated settings and mode 0600. No generic writes, automatic retries, or host-denial bypasses.
+
 ## Authorized student reactivation exception
 
 - An explicit human request to restore an identified inactive student enrollment authorizes only that exact inactive-to-active transition through the dedicated preview and reactivation tools. This exception does not expand invitation, SIS import, or deactivation tools.

@@ -10,6 +10,9 @@ from canvas_mcp import server
 
 class StudentDeactivationTests(unittest.TestCase):
     def setUp(self):
+        origin = mock.patch.object(server, "canvas_base_url", return_value="https://canvas.example.edu")
+        origin.start()
+        self.addCleanup(origin.stop)
         self.target = {
             "course_id": 123,
             "section_id": 456,
