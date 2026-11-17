@@ -220,6 +220,16 @@ To use another location, pass `--upload-config /absolute/private/path/upload-con
 
 Reconnect the MCP once after installing the code or changing launch arguments. The selected file is read on each upload, so subsequent file edits need no restart. This restores upload configuration when a host omits environment values; it does not enable writes. Exact course allowlists, technical confirmations, MCP-client approval, file-type and size limits, rooted-file validation, and upload/read-back checks remain in force. Connection configuration still rejects upload-root settings.
 
+If the installed package is outside the authoring client's writable locations, run the reviewed checkout directly using its `run_canvas_mcp.py` launcher. This does not modify the existing installation and works independently of the client's working directory:
+
+```toml
+[mcp_servers.canvas]
+command = "/absolute/path/to/existing-venv/bin/python"
+args = ["/absolute/path/to/reviewed-checkout/run_canvas_mcp.py", "--connection-config", "/absolute/private/path/connection.json", "--upload-config", "/absolute/private/path/upload-config.json"]
+```
+
+Use Python 3.11+ with the project's dependencies installed. Retain existing connection and write-policy settings. If an explicit upload-root environment setting exists, update it to the same reviewed root as the private upload configuration, because the explicit root takes precedence. Reconnect the saved MCP entry and verify `initialize` reports the reviewed version before relying on that entry. Running a separate local instance does not update a previously registered process.
+
 ### Creating a shell and inviting an instructor
 
 Version 0.14.3 uses **policy version 5** for exact provisioning approvals. Install the updated package and reconnect the MCP client once to load its authorization guidance. Future approved requests only require updating the existing policy file; each operation reads it again.
