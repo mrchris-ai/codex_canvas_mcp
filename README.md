@@ -203,6 +203,23 @@ All policy sources must be owned regular non-symlink files with mode `0600`, at 
 
 After installing this version, reconnect the active MCP once. Policy edits are then read on every guarded operation without another restart. Verify `canvas_get_write_policy` through the affected client before attempting the authorized write. Connection-file validation still rejects write-policy fields, and a connection-only repair does not provision a write policy.
 
+### Work clients that omit upload-root environment values
+
+Version 0.18.3 supports a separate private `~/.config/canvas-mcp/upload-config.json`:
+
+```json
+{
+  "CANVAS_IMAGE_UPLOAD_ROOT": "/absolute/path/to/reviewed-images",
+  "CANVAS_POWERPOINT_UPLOAD_ROOT": "/absolute/path/to/reviewed-presentations"
+}
+```
+
+Include only the upload types you need. Choose an owned directory that the authoring client can write to; the connector does not override filesystem restrictions. Keep the configuration outside Git, in a current-user-owned regular non-symlink file with mode `0600`, no larger than 16 KiB. It accepts only these two root settings, never credentials or write grants. No file or root is created automatically.
+
+To use another location, pass `--upload-config /absolute/private/path/upload-config.json` in the MCP arguments, or set `CANVAS_UPLOAD_CONFIG` to that path. The CLI argument selects the configuration file over the environment path. Each explicit root environment setting takes precedence over the corresponding file setting, even if the root is invalid. A specified file never falls back to the default if missing or invalid. Missing roots, duplicate keys, unsafe files, and unsupported fields fail closed.
+
+Reconnect the MCP once after installing the code or changing launch arguments. The selected file is read on each upload, so subsequent file edits need no restart. This restores upload configuration when a host omits environment values; it does not enable writes. Exact course allowlists, technical confirmations, MCP-client approval, file-type and size limits, rooted-file validation, and upload/read-back checks remain in force. Connection configuration still rejects upload-root settings.
+
 ### Creating a shell and inviting an instructor
 
 Version 0.14.3 uses **policy version 5** for exact provisioning approvals. Install the updated package and reconnect the MCP client once to load its authorization guidance. Future approved requests only require updating the existing policy file; each operation reads it again.

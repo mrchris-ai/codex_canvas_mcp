@@ -32,7 +32,7 @@ import urllib.request
 import certifi
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.18.2"
+SERVER_VERSION = "0.18.3"
 PROTOCOL_VERSION = "2025-03-26"
 PROVISIONING_AUTHORIZATION_GUIDANCE = (
     "Carry forward the human's authorization for the exact provisioning task. "
@@ -580,8 +580,17 @@ def require_number(value: Any, name: str, *, minimum: float = 0) -> float:
     return float(value)
 
 
+def upload_root_setting(name: str) -> str:
+    from canvas_mcp.upload_config import UploadConfigError, upload_root_setting as resolve
+
+    try:
+        return resolve(name)
+    except UploadConfigError as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+
 def image_upload_root() -> Path:
-    configured = required_env("CANVAS_IMAGE_UPLOAD_ROOT")
+    configured = upload_root_setting("CANVAS_IMAGE_UPLOAD_ROOT")
     path = Path(configured).expanduser()
     if not path.is_absolute():
         raise ConfigurationError("CANVAS_IMAGE_UPLOAD_ROOT must be an absolute path.")
@@ -640,7 +649,7 @@ def validate_image_file(value: Any) -> tuple[Path, str, int]:
 
 def validate_powerpoint_file(value: Any) -> tuple[Path, bytes]:
     """Validate a bounded, macro-free OOXML presentation and freeze its upload bytes."""
-    root = Path(required_env("CANVAS_POWERPOINT_UPLOAD_ROOT")).expanduser()
+    root = Path(upload_root_setting("CANVAS_POWERPOINT_UPLOAD_ROOT")).expanduser()
     if not root.is_absolute() or root.is_symlink():
         raise ConfigurationError("PowerPoint upload root must be absolute and not a symlink.")
     root = root.resolve(strict=True)
@@ -3228,7 +3237,15 @@ def main() -> None:
         "--connection-config", metavar="ABSOLUTE_JSON_PATH",
         help="Private connection metadata file; cannot supply tokens or write permissions.",
     )
+    parser.add_argument(
+        "--upload-config", metavar="ABSOLUTE_JSON_PATH",
+        help="Private upload-root metadata file; cannot supply tokens or write permissions.",
+    )
     args = parser.parse_args()
+    if args.upload_config is not None:
+        if not Path(args.upload_config).expanduser().is_absolute():
+            parser.exit(2, "Upload configuration path must be absolute.\n")
+        os.environ["CANVAS_UPLOAD_CONFIG"] = args.upload_config
     try:
         configure_connection(args.connection_config)
     except ConnectionConfigError as exc:
