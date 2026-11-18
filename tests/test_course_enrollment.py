@@ -347,7 +347,7 @@ class CourseEnrollmentPolicyTests(unittest.TestCase):
                     self.write_policy_file(directory, self.legacy_policy(version))
                     loaded = server.write_policy()
                     self.assertEqual(loaded["approved_course_enrollment_targets"], [])
-                    self.assertEqual(loaded["version"], 10)
+                    self.assertEqual(loaded["version"], server.POLICY_VERSION)
                     if version >= 9:
                         self.assertEqual(loaded["approved_user_creation_fingerprints"], ["a" * 64])
                     else:
@@ -358,6 +358,43 @@ class CourseEnrollmentPolicyTests(unittest.TestCase):
                             server.enroll_user_in_course({**self.target, "confirmation": self.confirmation})
                         read.assert_not_called()
                         write.assert_not_called()
+
+    def test_historical_version_10_shapes_stay_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"CANVAS_WRITE_POLICY": str(Path(directory) / "policy.json")}):
+                main_v10 = {**self.legacy_policy(9), "version": 10,
+                            "approved_course_enrollment_targets": [self.target]}
+                self.write_policy_file(directory, main_v10)
+                loaded = server.write_policy()
+                self.assertEqual(loaded["version"], server.POLICY_VERSION)
+                self.assertEqual(loaded["approved_course_enrollment_targets"], [self.target])
+                self.assertEqual(loaded["approved_sis_enrollment_import_fingerprints"], [])
+                self.assertEqual(loaded["approved_student_reactivation_fingerprints"], [])
+                self.assertEqual(loaded["approved_student_enrollment_deletion_fingerprints"], [])
+                mixed = {**main_v10, "approved_sis_enrollment_import_fingerprints": ["b" * 64]}
+                self.write_policy_file(directory, mixed)
+                with self.assertRaises(server.ConfigurationError):
+                    server.write_policy()
+                branch_v10 = {**self.legacy_policy(9), "version": 10,
+                              "approved_sis_enrollment_import_fingerprints": ["b" * 64]}
+                self.write_policy_file(directory, branch_v10)
+                loaded = server.write_policy()
+                self.assertEqual(loaded["approved_sis_enrollment_import_fingerprints"], ["b" * 64])
+                self.assertEqual(loaded["approved_course_enrollment_targets"], [])
+                branch_v12 = {
+                    **branch_v10,
+                    "version": 12,
+                    "approved_student_reactivation_fingerprints": ["c" * 64],
+                    "approved_student_enrollment_deletion_fingerprints": ["d" * 64],
+                }
+                self.write_policy_file(directory, branch_v12)
+                loaded = server.write_policy()
+                self.assertEqual(loaded["approved_student_enrollment_deletion_fingerprints"], ["d" * 64])
+                self.assertEqual(loaded["approved_course_enrollment_targets"], [])
+                stuffed = {**branch_v12, "approved_course_enrollment_targets": [self.target]}
+                self.write_policy_file(directory, stuffed)
+                with self.assertRaises(server.ConfigurationError):
+                    server.write_policy()
 
     def test_version_9_cannot_carry_the_new_key_and_version_10_requires_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -400,18 +437,19 @@ class CourseEnrollmentPolicyTests(unittest.TestCase):
         import canvas_mcp
         import tomllib
         root = Path(__file__).resolve().parents[1]
-        self.assertEqual(canvas_mcp.__version__, "0.19.0")
-        self.assertEqual(server.SERVER_VERSION, "0.19.0")
-        self.assertEqual(server.POLICY_VERSION, 10)
+        self.assertEqual(canvas_mcp.__version__, "0.21.2")
+        self.assertEqual(server.SERVER_VERSION, "0.21.2")
+        self.assertEqual(server.POLICY_VERSION, 13)
         with (root / "pyproject.toml").open("rb") as stream:
-            self.assertEqual(tomllib.load(stream)["project"]["version"], "0.19.0")
+            self.assertEqual(tomllib.load(stream)["project"]["version"], "0.21.2")
         example = json.loads((root / "config" / "write-policy.example.json").read_text())
-        self.assertEqual(example["version"], 10)
+        self.assertEqual(example["version"], server.POLICY_VERSION)
         self.assertIs(example["enabled"], False)
         self.assertEqual(example["approved_course_enrollment_targets"], [])
         self.assertEqual(example["approved_user_creation_fingerprints"], [])
+        self.assertEqual(example["approved_sis_enrollment_import_fingerprints"], [])
         for value in example.values():
-            if value is False or value == 10:
+            if value is False or value == server.POLICY_VERSION:
                 continue
             self.assertEqual(value, [])
         readme = (root / "README.md").read_text()

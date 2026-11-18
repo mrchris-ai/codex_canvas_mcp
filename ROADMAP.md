@@ -33,8 +33,10 @@ Each future feature needs its own narrow tool contract, least-privilege credenti
 - One-student deactivation is implemented through a dedicated preview and guarded mutation. It does not remove an enrollment.
 - Resolve identities without exposing unnecessary profile data.
 - One exact instructor invitation is implemented for an existing Canvas/SIS identity and an approved TeacherEnrollment role. Existing conflicts are refused.
-- A guarded exact student invitation is implemented. It still has no per-student allowlist.
-- One existing user can be enrolled in one course with one active course-level role through `canvas_preview_course_enrollment` and `canvas_enroll_user_in_course`. Policy version 10 requires an exact `approved_course_enrollment_targets` entry. Account-level roles, inactive roles, role changes, removals, reactivation, and bulk enrollment remain deferred.
+- Guarded exact student invitations and separately authorized inactive-to-active student reactivation, and exact active/invited course enrollment deletion with account preservation are implemented. Broad student enrollment creation, role changes, and broader invitations remain deferred.
+- Bounded enrollment-only SIS imports are implemented for explicitly approved batches of at most 25 students in one exact course section. Arbitrary SIS files, bulk/full-term sync, batch/diff mode, invitation activation, inactive/completed reactivation, and SIS account/course creation remain deferred.
+- One existing user can be enrolled in one course with one active course-level role through `canvas_preview_course_enrollment` and `canvas_enroll_user_in_course`. Policy version 13 requires an exact `approved_course_enrollment_targets` entry. A historical main version 10 file that already contains that key, and none of the later fingerprint lists, remains readable. Account-level roles, inactive roles, role changes, and bulk enrollment remain deferred.
+- Require role and course constraints in local policy.
 
 ### Maintenance
 

@@ -31,9 +31,13 @@ import urllib.request
 
 import certifi
 
+from canvas_mcp.content_authorization import CONTENT_AUTHORIZATION_GUIDANCE, CONTENT_WRITE_TOOLS
+
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.19.0"
-POLICY_VERSION = 10
+SERVER_VERSION = "0.21.2"
+# 13 is the first schema that contains both lineages: branch versions 10–12
+# (SIS import, reactivation, deletion) and main's course-enrollment targets.
+POLICY_VERSION = 13
 PROTOCOL_VERSION = "2025-03-26"
 PROVISIONING_AUTHORIZATION_GUIDANCE = (
     "Carry forward the human's authorization for the exact provisioning task. "
@@ -226,8 +230,51 @@ def disabled_policy() -> dict[str, Any]:
         "approved_instructor_enrollment_targets": [],
         "approved_user_update_targets": [],
         "approved_user_creation_fingerprints": [],
+        "approved_sis_enrollment_import_fingerprints": [],
+        "approved_student_reactivation_fingerprints": [],
+        "approved_student_enrollment_deletion_fingerprints": [],
         "approved_course_enrollment_targets": [],
     }
+
+
+def expected_policy_keys(version: int) -> set[str]:
+    """Required keys for the branch policy lineage.
+
+    Version 10 adds SIS-import fingerprints, 11 reactivation, and 12 deletion.
+    Version 13 adds general course-enrollment targets. Main's released version
+    10 file is a different key set; see main_version_10_policy_keys().
+    """
+    keys = {"version", "enabled", "approved_course_ids"}
+    if version >= 2:
+        keys.add("approved_rubric_delete_course_ids")
+    if version >= 3:
+        keys.add("approved_student_deactivation_course_ids")
+    if version >= 4:
+        keys.update(("approved_course_creation_account_ids",
+                     "approved_instructor_enrollment_course_ids",
+                     "approved_instructor_role_ids"))
+    if version >= 5:
+        keys.update(("approved_course_creation_targets", "approved_instructor_enrollment_targets"))
+    if version >= 6:
+        keys.add("approved_user_update_targets")
+    if version == 7:
+        keys.add("approved_student_enrollment_targets")
+    if version >= 9:
+        keys.add("approved_user_creation_fingerprints")
+    if version >= 10:
+        keys.add("approved_sis_enrollment_import_fingerprints")
+    if version >= 11:
+        keys.add("approved_student_reactivation_fingerprints")
+    if version >= 12:
+        keys.add("approved_student_enrollment_deletion_fingerprints")
+    if version >= 13:
+        keys.add("approved_course_enrollment_targets")
+    return keys
+
+
+def main_version_10_policy_keys() -> set[str]:
+    """Main's released version 10 schema: version 9 keys plus course enrollment."""
+    return expected_policy_keys(9) | {"approved_course_enrollment_targets"}
 
 
 MAX_WRITE_POLICY_BYTES = 1024 * 1024
@@ -242,12 +289,13 @@ def _unique_policy_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def write_policy() -> dict[str, Any]:
+def write_policy(path: Path | None = None) -> dict[str, Any]:
     # A separately provisioned private default supports clients that drop env values.
     # An explicit environment path always wins, including when it is missing.
-    configured_path = os.environ.get("CANVAS_WRITE_POLICY", "").strip()
-    path = (Path(configured_path).expanduser() if configured_path else
-            Path.home() / ".config" / "canvas-mcp" / "write-policy.json")
+    if path is None:
+        configured_path = os.environ.get("CANVAS_WRITE_POLICY", "").strip()
+        path = (Path(configured_path).expanduser() if configured_path else
+                Path.home() / ".config" / "canvas-mcp" / "write-policy.json")
     try:
         path.lstat()
     except FileNotFoundError:
@@ -275,28 +323,16 @@ def write_policy() -> dict[str, Any]:
     if not isinstance(policy, dict):
         raise ConfigurationError("The Canvas write policy must be a JSON object.")
     version = policy.get("version")
-    expected_keys = {"version", "enabled", "approved_course_ids"}
-    if version in {2, 3, 4, 5, 6, 7, 8, 9, 10}:
-        expected_keys.add("approved_rubric_delete_course_ids")
-    if version in {3, 4, 5, 6, 7, 8, 9, 10}:
-        expected_keys.add("approved_student_deactivation_course_ids")
     provision_keys = ("approved_course_creation_account_ids",
                       "approved_instructor_enrollment_course_ids", "approved_instructor_role_ids")
-    if version in {4, 5, 6, 7, 8, 9, 10}:
-        expected_keys.update(provision_keys)
-    if version in {5, 6, 7, 8, 9, 10}:
-        expected_keys.update(("approved_course_creation_targets", "approved_instructor_enrollment_targets"))
-    if version in {6, 7, 8, 9, 10}:
-        expected_keys.add("approved_user_update_targets")
-    if version == 7:
-        expected_keys.add("approved_student_enrollment_targets")
-    if version in {9, 10}:
-        expected_keys.add("approved_user_creation_fingerprints")
-    # Version 10 is the only schema that can name course-enrollment targets.
-    # Versions 1–9 stay readable and normalize to an empty list below.
-    if version == 10:
-        expected_keys.add("approved_course_enrollment_targets")
-    if set(policy) != expected_keys:
+    # Version 10 was claimed by both lineages. Accept each historical key set
+    # exactly; a mix is not a grant for either feature.
+    recognized = (
+        type(version) is int and version == 10 and set(policy) == main_version_10_policy_keys()
+    ) or (
+        type(version) is int and set(policy) == expected_policy_keys(version)
+    )
+    if not recognized:
         raise ConfigurationError("The Canvas write policy contains unexpected keys.")
     if type(version) is not int or version not in range(1, POLICY_VERSION + 1) or not isinstance(policy["enabled"], bool):
         raise ConfigurationError("The Canvas write policy has invalid version or enabled values.")
@@ -391,6 +427,23 @@ def write_policy() -> dict[str, Any]:
         raise ConfigurationError("User creation approvals must be SHA-256 fingerprints.")
     if len(creation_fingerprints) != len(set(creation_fingerprints)):
         raise ConfigurationError("User creation approvals must not contain duplicates.")
+    sis_fingerprints = policy.get("approved_sis_enrollment_import_fingerprints", [])
+    if (not isinstance(sis_fingerprints, list) or any(
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in sis_fingerprints) or len(sis_fingerprints) != len(set(sis_fingerprints))):
+        raise ConfigurationError("SIS enrollment import approvals must be unique SHA-256 fingerprints.")
+    reactivation_fingerprints = policy.get("approved_student_reactivation_fingerprints", [])
+    if (not isinstance(reactivation_fingerprints, list) or any(
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in reactivation_fingerprints)
+            or len(reactivation_fingerprints) != len(set(reactivation_fingerprints))):
+        raise ConfigurationError("Student reactivation approvals must be unique SHA-256 fingerprints.")
+    deletion_fingerprints = policy.get("approved_student_enrollment_deletion_fingerprints", [])
+    if (not isinstance(deletion_fingerprints, list) or any(
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in deletion_fingerprints)
+            or len(deletion_fingerprints) != len(set(deletion_fingerprints))):
+        raise ConfigurationError("Student enrollment deletion approvals must be unique SHA-256 fingerprints.")
     enrollment_targets = policy.get("approved_course_enrollment_targets", [])
     if not isinstance(enrollment_targets, list):
         raise ConfigurationError("approved_course_enrollment_targets must be a list.")
@@ -406,6 +459,9 @@ def write_policy() -> dict[str, Any]:
     return {
         "approved_user_update_targets": validated_updates,
         "approved_user_creation_fingerprints": creation_fingerprints,
+        "approved_sis_enrollment_import_fingerprints": sis_fingerprints,
+        "approved_student_reactivation_fingerprints": reactivation_fingerprints,
+        "approved_student_enrollment_deletion_fingerprints": deletion_fingerprints,
         "approved_course_enrollment_targets": validated_enrollments,
         **provision_policy,
         "version": POLICY_VERSION,
@@ -599,8 +655,17 @@ def require_number(value: Any, name: str, *, minimum: float = 0) -> float:
     return float(value)
 
 
+def upload_root_setting(name: str) -> str:
+    from canvas_mcp.upload_config import UploadConfigError, upload_root_setting as resolve
+
+    try:
+        return resolve(name)
+    except UploadConfigError as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+
 def image_upload_root() -> Path:
-    configured = required_env("CANVAS_IMAGE_UPLOAD_ROOT")
+    configured = upload_root_setting("CANVAS_IMAGE_UPLOAD_ROOT")
     path = Path(configured).expanduser()
     if not path.is_absolute():
         raise ConfigurationError("CANVAS_IMAGE_UPLOAD_ROOT must be an absolute path.")
@@ -659,7 +724,7 @@ def validate_image_file(value: Any) -> tuple[Path, str, int]:
 
 def validate_powerpoint_file(value: Any) -> tuple[Path, bytes]:
     """Validate a bounded, macro-free OOXML presentation and freeze its upload bytes."""
-    root = Path(required_env("CANVAS_POWERPOINT_UPLOAD_ROOT")).expanduser()
+    root = Path(upload_root_setting("CANVAS_POWERPOINT_UPLOAD_ROOT")).expanduser()
     if not root.is_absolute() or root.is_symlink():
         raise ConfigurationError("PowerPoint upload root must be absolute and not a symlink.")
     root = root.resolve(strict=True)
@@ -2863,7 +2928,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "canvas_get_write_policy",
-        "description": "Show write-policy state and operation-specific account, course, and role scopes. Does not expose credentials.",
+        "description": "Show write-policy scopes, running connector version, and image-upload configuration readiness. Does not expose credentials.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": {"readOnlyHint": True},
     },
@@ -3381,9 +3446,11 @@ for _name, _apply in (("canvas_preview_course_enrollment", False), ("canvas_enro
                        "enrollment[type] is set from that role's base_role_type and enrollment[role_id] "
                        "is the requested role. Account-level roles and inactive roles are rejected. "
                        "section_id is optional. enrollment_state defaults to invited and notify defaults "
-                       "to false, matching Canvas. The write requires an enabled policy version 10, "
+                       "to false, matching Canvas. The write requires an enabled policy version 13, "
                        "the exact target in approved_course_enrollment_targets, and the preview "
-                       "confirmation. That confirmation is a hash of the approved identity, the course, "
+                       "confirmation. A historical main version 10 file that already lists that key, "
+                       "and none of the later fingerprint lists, still loads. Branch policy versions "
+                       "10–12 do not grant this enrollment. That confirmation is a hash of the approved identity, the course, "
                        "and every enrollment field that will be posted, including the resolved user, "
                        "role type, state, notify flag, and section. Enabled and confirmation alone are "
                        "not enough. "
@@ -3395,7 +3462,32 @@ for _name, _apply in (("canvas_preview_course_enrollment", False), ("canvas_enro
     })
 
 
+from canvas_mcp import enrollment_deletion, reactivation, sis_import
+
+TOOLS.extend(sis_import.tools())
+TOOLS.extend(reactivation.tools())
+TOOLS.extend(enrollment_deletion.tools())
+
+for _tool in TOOLS:
+    if _tool["name"] in CONTENT_WRITE_TOOLS:
+        _tool["description"] += " " + CONTENT_AUTHORIZATION_GUIDANCE
+
+
 def call_tool(name: str, args: dict[str, Any]) -> Any:
+    if name == "canvas_preview_student_enrollment_deletion":
+        return enrollment_deletion.preview(args)
+    if name == "canvas_delete_student_enrollment":
+        return enrollment_deletion.delete(args)
+    if name == "canvas_preview_student_reactivation":
+        return reactivation.preview(args)
+    if name == "canvas_reactivate_student_enrollment":
+        return reactivation.reactivate(args)
+    if name == "canvas_preview_sis_enrollment_import":
+        return sis_import.preview(args)
+    if name == "canvas_submit_sis_enrollment_import":
+        return sis_import.submit(args)
+    if name == "canvas_verify_sis_enrollment_import":
+        return sis_import.verify(args)
     if name == "canvas_preview_user_creation":
         return preview_user_creation(args)
     if name == "canvas_create_user_account":
@@ -3437,7 +3529,13 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         rubric_id = require_positive_id(args.get("rubric_id"), "rubric_id")
         return inspect_course_rubric(course_id, rubric_id)
     if name == "canvas_get_write_policy":
-        return write_policy()
+        result = dict(write_policy(), connector_version=SERVER_VERSION)
+        try:
+            image_upload_root()
+            result["image_upload_configuration"] = {"ready": True}
+        except ConfigurationError as exc:
+            result["image_upload_configuration"] = {"ready": False, "error": str(exc)}
+        return result
     if name == "canvas_preview_student_deactivation":
         return preview_student_deactivation(args)
     if name == "canvas_deactivate_student_enrollment":
@@ -3615,8 +3713,9 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
                 "instructions": (
                     "Canvas reads are available after local credential setup. Content writing and "
                     "image/PowerPoint uploads are disabled unless secure local policy and payload gates enable them. "
-                    "Never reveal credentials. " + API_FIRST_GUIDANCE + PROVISIONING_AUTHORIZATION_GUIDANCE
-                    + USER_UPDATE_AUTHORIZATION_GUIDANCE + COURSE_ENROLLMENT_AUTHORIZATION_GUIDANCE
+                    "Never reveal credentials. " + API_FIRST_GUIDANCE + CONTENT_AUTHORIZATION_GUIDANCE
+                    + PROVISIONING_AUTHORIZATION_GUIDANCE + USER_UPDATE_AUTHORIZATION_GUIDANCE
+                    + COURSE_ENROLLMENT_AUTHORIZATION_GUIDANCE
                 ),
             },
         }
@@ -3647,7 +3746,15 @@ def main() -> None:
         "--connection-config", metavar="ABSOLUTE_JSON_PATH",
         help="Private connection metadata file; cannot supply tokens or write permissions.",
     )
+    parser.add_argument(
+        "--upload-config", metavar="ABSOLUTE_JSON_PATH",
+        help="Private upload-root metadata file; cannot supply tokens or write permissions.",
+    )
     args = parser.parse_args()
+    if args.upload_config is not None:
+        if not Path(args.upload_config).expanduser().is_absolute():
+            parser.exit(2, "Upload configuration path must be absolute.\n")
+        os.environ["CANVAS_UPLOAD_CONFIG"] = args.upload_config
     try:
         configure_connection(args.connection_config)
     except ConnectionConfigError as exc:

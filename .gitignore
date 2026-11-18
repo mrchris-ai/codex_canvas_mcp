@@ -10,4 +10,6 @@ venv/
 !.env.example
 write-policy.json
 *write-policy.local.json
+upload-config.json
+*upload-config.local.json
 .DS_Store

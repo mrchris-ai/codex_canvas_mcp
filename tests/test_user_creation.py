@@ -231,6 +231,9 @@ class UserCreationPolicyTests(unittest.TestCase):
                         server.write_policy()
                 legacy = {key: value for key, value in server.disabled_policy().items()
                           if key not in {"approved_user_creation_fingerprints",
+                                         "approved_sis_enrollment_import_fingerprints",
+                                         "approved_student_reactivation_fingerprints",
+                                         "approved_student_enrollment_deletion_fingerprints",
                                          "approved_course_enrollment_targets"}}
                 path.write_text(json.dumps({**legacy, "version": 8}))
                 self.assertEqual(server.write_policy()["approved_user_creation_fingerprints"], [])

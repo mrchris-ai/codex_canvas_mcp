@@ -6,7 +6,7 @@ A portable local MCP server that lets compatible clients read Canvas and, only a
 
 - Canvas reads are available by default after local credential setup.
 - Writing is disabled by default.
-- Every content write requires an enabled local policy, an exact per-course allowlist match, exact confirmation text, and approval in the MCP client.
+- Every content write requires an enabled local policy, an exact per-course allowlist match, an explicit user-directed task, agent-supplied confirmation text, and the applicable MCP-client controls. One task approval carries through its necessary writes; it is not requested again for every tool call.
 - Image upload adds a payload gate: only a locally owned PNG, JPEG, or WebP inside one configured trusted folder, no larger than 10 MiB, can be sent.
 - There is no generic Canvas write tool.
 - Credentials stay in 1Password and, optionally, macOS Keychain. They do not belong in this repository or client configuration.
@@ -45,6 +45,9 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_preview_instructor_enrollment` | Verify an existing instructor identity, section, and role | Available |
 | `canvas_enroll_instructor` | Invite and verify one instructor with an approved teacher role | Blocked |
 | `canvas_preview_student_enrollment` | Verify one student's identity, course, section, role, and existing enrollment | Available |
+| `canvas_preview_sis_enrollment_import` | Preview generated CSV for up to 25 students in one exact course section | Available |
+| `canvas_submit_sis_enrollment_import` | Submit one approved enrollment-only SIS import | Blocked |
+| `canvas_verify_sis_enrollment_import` | Verify the recorded import and its active enrollments | Available |
 | `canvas_enroll_student` | Invite and verify one exact student after an explicit request | Blocked |
 | `canvas_preview_user_creation` | Check one new root-account user and return its approval fingerprint | Available |
 | `canvas_create_user_account` | Create and verify one root-account user after an exact fingerprint grant | Blocked |
@@ -52,6 +55,10 @@ Rubric creation accepts a same-origin Canvas assignment URL, an assignment modul
 | `canvas_enroll_user_in_course` | Enroll that user after an exact policy-version-10 target grant | Blocked |
 | `canvas_preview_student_deactivation` | Read one exact student enrollment and preview deactivation | Available |
 | `canvas_deactivate_student_enrollment` | Deactivate and verify one active student enrollment | Blocked |
+| `canvas_preview_student_reactivation` | Verify one exact inactive student enrollment and preview restoring access | Available |
+| `canvas_preview_student_enrollment_deletion` | Verify one exact student course enrollment for authorized deletion | Available |
+| `canvas_delete_student_enrollment` | Delete one exact active/invited course enrollment, preserving the account | Blocked |
+| `canvas_reactivate_student_enrollment` | Reactivate and independently verify one approved student enrollment | Blocked |
 | `canvas_upload_powerpoint` | Upload one validated macro-free PPTX from its trusted folder | Blocked |
 | `canvas_upload_image` | Upload one verified image from the configured trusted folder | Blocked |
 | `canvas_write_page` | Create or update one page | Blocked |
@@ -182,7 +189,7 @@ After changing the arguments, reload the connector in the affected client and ve
 
 ## Enabling content-authoring tools
 
-Keep writing off unless a specific task requires it.
+Keep writing off until the user approves course-content access. Once a course is persistently approved, retain it for future user-directed tasks.
 
 1. Copy `config/write-policy.example.json` to a location outside the repository.
 2. Add only the exact Canvas course IDs approved for content authoring to `approved_course_ids`. Add courses approved only for zero-dependency rubric deletion to `approved_rubric_delete_course_ids`, and courses approved for student deactivation to `approved_student_deactivation_course_ids`. Each list is independent.
@@ -194,8 +201,25 @@ Keep writing off unless a specific task requires it.
 
 4. Add `CANVAS_WRITE_POLICY=/absolute/private/path/write-policy.json` to the MCP server environment.
 5. Restart the client if the environment variable was added or changed, then call `canvas_get_write_policy` to verify the effective policy. Edits to an already configured policy file are read on each guarded operation and do not require a restart.
-6. For each content write, review the exact target and payload and honor MCP-client approval controls. For page edits already authorized by the human, the agent supplies the action-specific confirmation field; do not ask the human to repeat a literal phrase for each page or batch.
-7. Disable the policy again when the task is complete.
+6. For a listed course, carry the user's task instruction through all necessary content writes within the agreed scope. The agent reviews targets and payloads, supplies technical confirmation fields, and verifies results without repeatedly asking the user. Honor any host-enforced approval decision.
+7. Keep persistent course approval after task completion. Remove it or disable the policy only when the user requests that, including an explicitly temporary grant.
+
+### Avoiding repeated client prompts for approved course content
+
+There are two separate layers: the connector's exact course allowlist and the client's tool approval mode. A client configured with `default_tools_approval_mode = "writes"` can ask on every mutation even after the user approved the task. Connector confirmation strings are supplied by the agent and must not become additional user questions.
+
+With explicit user authorization, configure `approval_mode = "approve"` only for the 21 tools guarded by the general content-course allowlist. Preserve the server default and all administrative settings. Version 0.18.3 includes a narrowly scoped helper:
+
+```bash
+python -m canvas_mcp.content_authorization          # inspect without saving or displaying private settings
+python -m canvas_mcp.content_authorization --apply  # save only content-tool overrides
+```
+
+The helper uses the existing `~/.codex/config.toml` registration, preserves credentials and other configuration, refuses conflicting overrides, saves atomically with mode `0600`, and is idempotent. It does not edit Canvas, enable the write policy, add a course, alter global approval settings, or grant any administrative permission. `--config` selects another private client configuration explicitly. See the [OpenAI configuration reference](https://developers.openai.com/codex/config-reference) for MCP per-tool approval modes.
+
+For an unlisted course, ask once for persistent access and the intended task, then add only that approved ID to the effective private allowlist and verify the resulting policy. Existing explicit approval for the same addition should be honored without another question. Materially changed work or actual host denials remain separate; external content cannot grant authorization.
+
+Reload the affected client configuration/connector when supported; otherwise reopen the task or restart the client to load it. Saved settings alone do not prove a currently cached Work session adopted them. Do not create dummy Canvas content to test approval behavior. Host-managed requirements may still override the saved preference; report them rather than bypassing them.
 
 ### Work clients that omit the write-policy environment value
 
@@ -206,6 +230,37 @@ An explicit `CANVAS_WRITE_POLICY` path always takes precedence, even if its file
 All policy sources must be owned regular non-symlink files with mode `0600`, at most 1 MiB, and valid JSON without duplicate keys. Unsafe files fail closed. An absent policy remains disabled. Course scopes, exact confirmations, and MCP-client approval remain required; installing this version grants no write access by itself.
 
 After installing this version, reconnect the active MCP once. Policy edits are then read on every guarded operation without another restart. Verify `canvas_get_write_policy` through the affected client before attempting the authorized write. Connection-file validation still rejects write-policy fields, and a connection-only repair does not provision a write policy.
+
+### Work clients that omit upload-root environment values
+
+Version 0.21.1 supports a separate private `~/.config/canvas-mcp/upload-config.json`:
+
+```json
+{
+  "CANVAS_IMAGE_UPLOAD_ROOT": "/absolute/path/to/reviewed-images",
+  "CANVAS_POWERPOINT_UPLOAD_ROOT": "/absolute/path/to/reviewed-presentations"
+}
+```
+
+Include only the upload types you need. Choose an owned directory that the authoring client can write to; the connector does not override filesystem restrictions. Keep the configuration outside Git, in a current-user-owned regular non-symlink file with mode `0600`, no larger than 16 KiB. It accepts only these two root settings, never credentials or write grants. No file or root is created automatically.
+
+To use another location, pass `--upload-config /absolute/private/path/upload-config.json` in the MCP arguments, or set `CANVAS_UPLOAD_CONFIG` to that path. The CLI argument selects the configuration file over the environment path. Each explicit root environment setting takes precedence over the corresponding file setting, even if the root is invalid. A specified file never falls back to the default if missing or invalid. Missing roots, duplicate keys, unsafe files, and unsupported fields fail closed.
+
+Reconnect the MCP once after installing the code or changing launch arguments. The selected file is read on each upload, so subsequent file edits need no restart. This restores upload configuration when a host omits environment values; it does not enable writes. Exact course allowlists, technical confirmations, MCP-client approval, file-type and size limits, rooted-file validation, and upload/read-back checks remain in force. Connection configuration still rejects upload-root settings.
+
+If the installed package is outside the authoring client's writable locations, run the reviewed checkout directly using its `run_canvas_mcp.py` launcher. This does not modify the existing installation and works independently of the client's working directory:
+
+```toml
+[mcp_servers.canvas]
+command = "/absolute/path/to/existing-venv/bin/python"
+args = ["/absolute/path/to/reviewed-checkout/run_canvas_mcp.py", "--connection-config", "/absolute/private/path/connection.json", "--upload-config", "/absolute/private/path/upload-config.json"]
+```
+
+Use Python 3.11+ with the project's dependencies installed. Retain existing connection and write-policy settings. If an explicit upload-root environment setting exists, update it to the same reviewed root as the private upload configuration, because the explicit root takes precedence. Reconnect the saved MCP entry and verify `initialize` reports the reviewed version before relying on that entry. Running a separate local instance does not update a previously registered process.
+
+If Work still uses a cached `python -m canvas_mcp` launch after a configuration change, the repair must also be present in that interpreter's installed checkout, with the private fallback at `~/.config/canvas-mcp/upload-config.json`. `install_work_upload_repair.py` provides a read-only preflight by default and a user-run `--apply` installation option. It requires separate clean source/installed checkouts from the same repository and a fast-forward relationship, preserves the existing PowerPoint root and write policy, backs up existing upload configuration, and verifies an old-arguments/no-upload-environment launch. It never terminates processes or calls Canvas. A host filesystem denial must not be bypassed by running it through another tool; in that case the user runs it in Terminal. Reload the affected Canvas server afterward and verify through the active MCP.
+
+`canvas_get_write_policy` now includes `connector_version` and `image_upload_configuration.ready`, so cached tool registrations can report the actual running implementation and upload-root readiness without a test upload. A local launcher test alone is not proof that the active Work connector has reloaded.
 
 ### Creating a shell and inviting an instructor
 
@@ -240,7 +295,7 @@ A changed name, code, term, campus, instructor, section, or role requires its ow
 
 First confirm the official enrollment disposition outside Canvas. Use `canvas_preview_student_deactivation` with the course ID, section ID, enrollment ID, Canvas user ID, and SIS user ID. It shows the live state and makes no change. The mutation accepts the same exact IDs plus `APPROVE CANVAS STUDENT DEACTIVATION course <course_id> enrollment <enrollment_id>` after human authorization and MCP-client approval. The local policy must be version 3 or later and the course must appear in `approved_student_deactivation_course_ids`; version 1 and 2 policies remain readable but grant no deactivation access. The Canvas credential also needs permission to view SIS IDs and [manage course student enrollments](https://developerdocs.instructure.com/services/canvas/permissions/details/file.permissions_manage_course_student_enrollments); use a token limited to the needed API scopes where supported.
 
-The tool refuses a mismatched identity or a non-active enrollment, sends only Canvas's `task=deactivate` action to the exact enrollment, and confirms the resulting inactive state through a second read. An already inactive enrollment returns a verified no-change result. If verification fails after the request, inspect the Canvas roster before retrying. Canvas's [Enrollments API](https://developerdocs.instructure.com/services/canvas/resources/enrollments) documents deactivation as distinct from deletion; restoring access requires a separately authorized reactivation action, which this connector does not provide.
+The tool refuses a mismatched identity or a non-active enrollment, sends only Canvas's `task=deactivate` action to the exact enrollment, and confirms the resulting inactive state through a second read. An already inactive enrollment returns a verified no-change result. If verification fails after the request, inspect the Canvas roster before retrying. Canvas's [Enrollments API](https://developerdocs.instructure.com/services/canvas/resources/enrollments) documents deactivation as distinct from deletion. Restoring access uses the separately authorized [student reactivation tools](#guarded-student-reactivation-0200).
 
 ### Authoring in a Blueprint course
 
@@ -273,7 +328,7 @@ Canvas uses a documented three-step upload exchange: initialize the course file 
 
 ## Current authoring boundary
 
-This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its local-file capabilities are the payload-gated image and PowerPoint uploaders described above. Guarded student deactivation, blank-shell creation, instructor invitations, student invitations, student account creation, and exact enrollment of an existing user are supported. Generic file upload, New Quizzes, role changes, enrollment removal, reactivation, cross-listing, template copying, and broader account administration remain unsupported.
+This project is the source of truth for the shared local Canvas MCP used by supported chats on this Mac. It can author Pages, Modules and module items, Assignments and assignment Rubrics, Discussions, Announcements, and Classic Quizzes with questions after the normal policy and approval gates. It also provides resource-specific deletion tools for Pages, Assignments, Discussions, Classic Quizzes, Modules, and zero-dependency course-owned Rubrics; deleting a Module removes its item placements but not the underlying course content. Its local-file capabilities are the payload-gated image and PowerPoint uploaders described above. Guarded student deactivation, reactivation, and exact enrollment deletion, student and instructor invitations, enrollment-only SIS imports, blank-shell creation, student account creation, and exact enrollment of one existing user are supported. Generic file upload, New Quizzes, role changes, cross-listing, template copying, and broader account or course administration remain unsupported.
 
 See [`docs/2026-08-06-content-authoring-extension.md`](docs/2026-08-06-content-authoring-extension.md) for the implementation and end-to-end validation record.
 See [`docs/2026-08-16-image-upload-extension.md`](docs/2026-08-16-image-upload-extension.md) for the image-upload threat model and validation record.
@@ -299,7 +354,36 @@ Install the new source and reconnect the client once for tool discovery. Future 
 
 ## Guarded student invitation (0.17.1)
 
-`canvas_preview_student_enrollment` checks the exact Canvas user, SIS user, SIS course, section, and built-in StudentEnrollment role. After an explicit human request for that student and course, `canvas_enroll_student` requires the preview confirmation, an enabled local write policy, and MCP-client approval. No per-student policy entry is needed. That missing per-target list is unchanged. Use the version 10 course-enrollment tools below when the enrollment needs its own allowlist entry or a role other than the built-in student role. The request binds `course_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `sis_course_id`, and `role_id`. An identical active or invited enrollment returns a verified no-op. One deleted enrollment with all six target fields matching can be re-enrolled; any other conflicting enrollment blocks the write. A new invitation notifies the student and is read back, allowing Canvas either to revive the deleted record or to retain it alongside one matching live record. An uncertain result must be inspected before any retry. Policy version 8 omits `approved_student_enrollment_targets`; older policies remain readable, but version 7 entries no longer authorize or restrict student invitations.
+`canvas_preview_student_enrollment` checks the exact Canvas user, SIS user, SIS course, section, and built-in StudentEnrollment role. After an explicit human request for that student and course, `canvas_enroll_student` requires the preview confirmation, an enabled local write policy, and MCP-client approval. No per-student policy entry is needed. That missing per-target list is unchanged. Use the general course-enrollment tools below when the enrollment needs its own allowlist entry or a role other than the built-in student role. The request binds `course_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `sis_course_id`, and `role_id`. An identical active or invited enrollment returns a verified no-op. One deleted enrollment with all six target fields matching can be re-enrolled; any other conflicting enrollment blocks the write. A new invitation notifies the student and is read back, allowing Canvas either to revive the deleted record or to retain it alongside one matching live record. An uncertain result must be inspected before any retry. Policy version 8 omits `approved_student_enrollment_targets`; older policies remain readable, but version 7 entries no longer authorize or restrict student invitations.
+
+## Guarded student reactivation (0.20.0)
+
+Use `canvas_preview_student_reactivation` and `canvas_reactivate_student_enrollment` only after an explicit human request to restore one identified inactive student enrollment. The request binds the exact `course_id`, `enrollment_id`, `section_id`, `canvas_user_id`, `sis_user_id`, `sis_course_id`, and built-in student `role_id`. Preserve SIS IDs as strings, including leading zeros.
+
+The preview verifies the student, course, section, role, and enrollment, and returns an `approval_fingerprint` and technical `confirmation`. Private policy version 11 adds the separate `approved_student_reactivation_fingerprints` list. Add only the approved preview fingerprint for the duration of the operation, preserving existing grants, the enabled state, and mode `0600`. Versions 1 through 10 remain readable but grant no reactivation permission. The explicit human task authorizes this temporary exact grant; the agent supplies the technical confirmation without asking the human to repeat it. MCP-client approval still applies.
+
+The mutation rechecks the exact target, restores only an inactive StudentEnrollment, and independently verifies the resulting active enrollment. An identical already-active target is a verified no-op. Invitations, deleted/completed enrollments, identity conflicts, role changes, and arbitrary state changes are refused. Do not retry uncertain writes automatically; inspect the exact enrollment first. Remove the request-added policy fingerprint after the attempt.
+
+Install and reconnect the MCP client to discover the new tools. Installation alone does not enable reactivation. Enrollment deletion uses its separately authorized tools below. See the [reactivation contract](docs/student-reactivation.md).
+
+## Guarded student enrollment deletion (0.21.0)
+
+Use `canvas_preview_student_enrollment_deletion` and `canvas_delete_student_enrollment` only after explicit authorization to delete the identified course enrollment. For rollback, first reconcile the exact enrollment ID against prior write receipts. These tools preserve the student account and accept the same seven identity fields as reactivation. They require a separate origin-bound fingerprint in private policy version 12's `approved_student_enrollment_deletion_fingerprints`, the preview confirmation, enabled policy, and MCP-client approval. Earlier policies preserve their existing scopes and grant no deletion permission.
+
+Only exact active or invited enrollments transition to deleted through a fixed `task=delete` request; an exact deleted enrollment is a verified no-op. Inactive/completed and ambiguous enrollments fail. Independent read-back verifies the deleted enrollment and preserved account and protected fields. Remove request-added grants after the attempt and never automatically retry uncertainty. Install and reconnect for tool discovery. See the [enrollment deletion contract](docs/student-enrollment-deletion.md).
+
+## Guarded SIS enrollment imports (0.19.0)
+
+Use the three SIS enrollment import tools when the human explicitly requests traditional SIS enrollment creation. These are separate from the regular invitation tools. They generate a UTF-8 `enrollments.csv` for 1 to 25 verified students in one exact SIS course section, using `student`, `active`, and `notify=false`. They accept no file path, arbitrary CSV, deletion, batch/diff mode, override, or account/course-creation options.
+
+1. Call `canvas_preview_sis_enrollment_import` with `account_id` (the root), `course_id`, `section_id`, `sis_course_id`, `sis_section_id`, built-in student `role_id`, and `students` containing exact `canvas_user_id` / `sis_user_id` pairs. Keep SIS IDs as strings, including leading zeros. A null `sis_section_id` is allowed only for the course's sole section. The preview verifies root account, SIS permission, course/section identities, SIS resolution, built-in role, and existing enrollments, and returns the generated CSV.
+2. With explicit human approval of those students and that course, migrate the private policy to version 10 and add only the preview's `approval_fingerprint` to `approved_sis_enrollment_import_fingerprints`. Preserve other grants, the enabled state, and mode `0600`. Versions 1 through 9 remain readable and grant no SIS import access. Installation alone does not enable this administrative operation.
+3. Submit the exact target with the preview's `confirmation` through `canvas_submit_sis_enrollment_import` under MCP-client approval. An already active exact enrollment is excluded from the CSV. An exact deleted enrollment may be restored. Invitations, inactive/completed enrollments, competing roles/sections, and duplicate IDs block the batch. Submission is asynchronous and is **not** reported as completed enrollment.
+4. Poll `canvas_verify_sis_enrollment_import` with the same target and returned `import_id`. Success requires a clean enrollment-only import with expected row counts and an exact active read-back for every student, including matching `sis_import_id` on imported records. Pending, warnings, failed import, or mismatched results are not success. Remove only the temporary policy fingerprint after the submission attempt; verification does not need a write grant.
+
+The connector reserves a private receipt under `~/.canvas-mcp-sis-imports/` before the POST. The directory is mode `0700` and each receipt is mode `0600`. A repeated target cannot silently submit again, including after a timeout or process crash. Preserve receipts outside Git. If a request returns no import ID, inspect Canvas's import history before any operator-directed recovery. Do not automatically retry, delete receipts, or roll back partially applied imports. A later deliberate repeat of the identical batch requires explicit operator review of its existing receipt.
+
+Reconnect existing MCP clients after installing 0.19.0 to discover the three tools. Existing content and invitation permissions are unchanged. See the [SIS import contract](docs/sis-enrollment-import.md) for scope, API references, and recovery.
 
 ## Guarded student account creation (0.18.0)
 
@@ -317,7 +401,7 @@ For an explicitly authorized account, add the preview's `approval_fingerprint` t
 
 The preview reads the course account's roles, including inherited roles, and rejects a missing, account-level, or inactive role. Built-in roles (`workflow_state` `built_in`) and active custom roles are accepted. The write sends `enrollment[role_id]` as requested and sets `enrollment[type]` from that role's live `base_role_type` (`StudentEnrollment`, `TeacherEnrollment`, `TaEnrollment`, `DesignerEnrollment`, or `ObserverEnrollment`). Course-wide privileges are requested. An identical enrollment is a verified no-op. A same-role enrollment in a different state is left unchanged. This tool does not remove enrollments or change an existing role.
 
-Policy version 10 adds `approved_course_enrollment_targets`. Each entry is the normalized target and must include `course_id`, `role_id`, `enrollment_state`, `notify`, and at least one of `canvas_user_id` or `sis_user_id`. Include `section_id` only when the enrollment is for that section. `canvas_enroll_user_in_course` requires `enabled: true`, that exact entry, and the preview confirmation. The confirmation is `APPROVE CANVAS COURSE ENROLLMENT` plus the SHA-256 of the approved identity, the course id, and the enrollment object that will be posted: resolved Canvas user id, `type`, `role_id`, `enrollment_state`, `notify`, `course_section_id` when a section was requested, and `limit_privileges_to_course_section: false`. Preview and write hash that same object. A confirmation cannot authorize a target that is absent from the allowlist. Versions 1–9 remain readable, keep the scopes they already had, and grant no course enrollment through this tool. `canvas_enroll_student` and `canvas_enroll_instructor` are unchanged.
+Policy version 13 adds `approved_course_enrollment_targets` on top of the version 12 fingerprint lists. Each entry is the normalized target and must include `course_id`, `role_id`, `enrollment_state`, `notify`, and at least one of `canvas_user_id` or `sis_user_id`. Include `section_id` only when the enrollment is for that section. `canvas_enroll_user_in_course` requires `enabled: true`, that exact entry, and the preview confirmation. The confirmation is `APPROVE CANVAS COURSE ENROLLMENT` plus the SHA-256 of the approved identity, the course id, and the enrollment object that will be posted: resolved Canvas user id, `type`, `role_id`, `enrollment_state`, `notify`, `course_section_id` when a section was requested, and `limit_privileges_to_course_section: false`. Preview and write hash that same object. A confirmation cannot authorize a target that is absent from the allowlist. Versions 1–9 remain readable, keep the scopes they already had, and grant no course enrollment through this tool. A historical main version 10 file that contains this key and none of the later fingerprint lists remains readable. Branch policy versions 10–12 keep SIS import, reactivation, and deletion, and grant no general course enrollment. `canvas_enroll_student` and `canvas_enroll_instructor` are unchanged.
 
 ```json
 {
@@ -334,3 +418,13 @@ Keep real IDs in the private policy only. The example file stays disabled and em
 ## API-first workflow
 
 Use the connector API for supported reads and authorized changes. Handle exact temporary policy entries and technical confirmation values within the user's existing authorization. If installed tools are missing from the active session, reconnect before using them; do not switch to browser editing solely because of that setup step. Use the in-app browser only for a capability the connector does not expose or for necessary visual inspection, explaining the limitation first. Permission and approval denials apply regardless of the interface and must never be bypassed.
+
+### Approve one content course locally
+
+On the connector host, use its Python environment to run the following command from this checkout. Supply the private policy that the active client uses. When the client omits `CANVAS_WRITE_POLICY`, its default is `~/.config/canvas-mcp/write-policy.json`.
+
+```sh
+python approve_content_course.py --policy ~/.config/canvas-mcp/write-policy.json COURSE_ID
+```
+
+The command requires an existing, enabled policy owned by the operator with mode 0600. It adds one content course and preserves the other grants. Check the live result with `canvas_get_write_policy` before authoring. Run the command locally with an account that has permission to edit the policy file. It is not exposed as an MCP tool.

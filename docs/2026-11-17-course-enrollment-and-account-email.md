@@ -2,6 +2,8 @@
 
 Policy version 10. Package version 0.19.0. Versions 1–9 remain readable. They keep the scopes they already had and do not grant `approved_course_enrollment_targets`.
 
+The 0.21.1 line had already used policy versions 10–12 for SIS import, reactivation, and deletion. After that work was merged with this feature, the current schema is policy version 13, which requires every version 12 key plus `approved_course_enrollment_targets`. A version 10 file written for this document, with that enrollment key and no later fingerprint keys, still loads. Branch versions 10–12 stay readable and grant no general course enrollment.
+
 ## Account creation
 
 `canvas_preview_user_creation` and `canvas_create_user_account` still create one account in the active root account. Full name, `short_name`, sortable name, ten-digit SIS ID, duplicate checks, permission checks, and read-back are unchanged.

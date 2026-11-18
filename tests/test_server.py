@@ -165,7 +165,9 @@ class ServerSafetyTests(unittest.TestCase):
                     server.validate_image_file(str(symlink))
 
     def test_image_upload_root_is_required_and_absolute(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(server.Path, "home", return_value=Path(directory)), \
+                mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(server.ConfigurationError):
                 server.image_upload_root()
         with mock.patch.dict(os.environ, {"CANVAS_IMAGE_UPLOAD_ROOT": "relative"}, clear=True):
@@ -227,8 +229,11 @@ class ServerSafetyTests(unittest.TestCase):
             }
             environment = {
                 "CANVAS_BASE_URL": "https://canvas.example.edu",
-                "CANVAS_IMAGE_UPLOAD_ROOT": str(root),
+                "CANVAS_UPLOAD_CONFIG": str(root / "upload-config.json"),
             }
+            config = root / "upload-config.json"
+            config.write_text(json.dumps({"CANVAS_IMAGE_UPLOAD_ROOT": str(root)}))
+            config.chmod(0o600)
             with (
                 mock.patch.dict(os.environ, environment, clear=True),
                 mock.patch.object(server, "require_image_upload_approval") as approval,
