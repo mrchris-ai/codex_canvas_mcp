@@ -59,6 +59,17 @@ These rules apply to the entire repository.
 - Before committing, run the unit tests, compile the package, inspect the staged diff, and scan tracked content for credential-like strings.
 - Administrative Canvas features beyond the existing guarded exceptions belong in `ROADMAP.md` until separately designed, reviewed, and authorized.
 
+## Main is the single source of truth
+
+ChatGPT, Grok Bot, Cursor, and humans all change this repository. `main` is the only line those changes start from and land on.
+
+- Branch from current `main`.
+- Rebase on or merge the latest `main` right before opening a pull request.
+- Bump the version (semver) in every place it is declared.
+- Change `main` only by merging a pull request.
+- Do not push directly to `main`.
+- Do not deploy from an unmerged branch.
+
 ## Verification
 
 From an activated virtual environment:

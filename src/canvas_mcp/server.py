@@ -34,7 +34,7 @@ import certifi
 from canvas_mcp.content_authorization import CONTENT_AUTHORIZATION_GUIDANCE, CONTENT_WRITE_TOOLS
 
 SERVER_NAME = "codex-canvas-mcp"
-SERVER_VERSION = "0.21.1"
+SERVER_VERSION = "0.21.2"
 # 13 is the first schema that contains both lineages: branch versions 10–12
 # (SIS import, reactivation, deletion) and main's course-enrollment targets.
 POLICY_VERSION = 13

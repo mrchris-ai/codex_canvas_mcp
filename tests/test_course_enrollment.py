@@ -437,11 +437,11 @@ class CourseEnrollmentPolicyTests(unittest.TestCase):
         import canvas_mcp
         import tomllib
         root = Path(__file__).resolve().parents[1]
-        self.assertEqual(canvas_mcp.__version__, "0.21.1")
-        self.assertEqual(server.SERVER_VERSION, "0.21.1")
+        self.assertEqual(canvas_mcp.__version__, "0.21.2")
+        self.assertEqual(server.SERVER_VERSION, "0.21.2")
         self.assertEqual(server.POLICY_VERSION, 13)
         with (root / "pyproject.toml").open("rb") as stream:
-            self.assertEqual(tomllib.load(stream)["project"]["version"], "0.21.1")
+            self.assertEqual(tomllib.load(stream)["project"]["version"], "0.21.2")
         example = json.loads((root / "config" / "write-policy.example.json").read_text())
         self.assertEqual(example["version"], server.POLICY_VERSION)
         self.assertIs(example["enabled"], False)
