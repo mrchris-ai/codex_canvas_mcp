@@ -245,12 +245,13 @@ def _unique_policy_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def write_policy() -> dict[str, Any]:
+def write_policy(path: Path | None = None) -> dict[str, Any]:
     # A separately provisioned private default supports clients that drop env values.
     # An explicit environment path always wins, including when it is missing.
-    configured_path = os.environ.get("CANVAS_WRITE_POLICY", "").strip()
-    path = (Path(configured_path).expanduser() if configured_path else
-            Path.home() / ".config" / "canvas-mcp" / "write-policy.json")
+    if path is None:
+        configured_path = os.environ.get("CANVAS_WRITE_POLICY", "").strip()
+        path = (Path(configured_path).expanduser() if configured_path else
+                Path.home() / ".config" / "canvas-mcp" / "write-policy.json")
     try:
         path.lstat()
     except FileNotFoundError:

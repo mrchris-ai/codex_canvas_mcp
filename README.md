@@ -389,3 +389,13 @@ For an explicitly authorized account, add the preview's `approval_fingerprint` t
 ## API-first workflow
 
 Use the connector API for supported reads and authorized changes. Handle exact temporary policy entries and technical confirmation values within the user's existing authorization. If installed tools are missing from the active session, reconnect before using them; do not switch to browser editing solely because of that setup step. Use the in-app browser only for a capability the connector does not expose or for necessary visual inspection, explaining the limitation first. Permission and approval denials apply regardless of the interface and must never be bypassed.
+
+### Approve one content course locally
+
+On the connector host, use its Python environment to run the following command from this checkout. Supply the private policy that the active client uses. When the client omits `CANVAS_WRITE_POLICY`, its default is `~/.config/canvas-mcp/write-policy.json`.
+
+```sh
+python approve_content_course.py --policy ~/.config/canvas-mcp/write-policy.json COURSE_ID
+```
+
+The command requires an existing, enabled policy owned by the operator with mode 0600. It adds one content course and preserves the other grants. Check the live result with `canvas_get_write_policy` before authoring. Run the command locally with an account that has permission to edit the policy file. It is not exposed as an MCP tool.
