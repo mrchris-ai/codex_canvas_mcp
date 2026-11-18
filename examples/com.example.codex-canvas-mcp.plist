@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.codex-canvas-mcp</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/Library/Application Support/codex-canvas-mcp/runtime/venv/bin/python</string>
+    <string>-m</string>
+    <string>canvas_mcp.socket_bridge</string>
+    <string>daemon</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/YOU</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>CANVAS_MCP_SOCKET</key>
+    <string>/Users/YOU/Library/Application Support/codex-canvas-mcp/canvas.sock</string>
+    <key>CANVAS_BASE_URL</key>
+    <string>https://school.instructure.com</string>
+    <key>CANVAS_OP_VAULT</key>
+    <string>your-vault</string>
+    <key>CANVAS_OP_ITEM</key>
+    <string>your-canvas-token-item</string>
+    <key>CANVAS_OP_FIELD</key>
+    <string>credential</string>
+    <key>CANVAS_KEYCHAIN_SERVICE</key>
+    <string>your-keychain-service</string>
+    <key>CANVAS_KEYCHAIN_ACCOUNT</key>
+    <string>your-keychain-account</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/dev/null</string>
+  <key>StandardErrorPath</key>
+  <string>/dev/null</string>
+</dict>
+</plist>
